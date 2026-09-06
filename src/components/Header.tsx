@@ -37,6 +37,7 @@ export function Header() {
   const { path } = useLocation();
   const silenceRemoverHref = `${BASE_PATH}/`;
   const alignmentHref = `${BASE_PATH}/alignment`;
+  const roomReverbHref = `${BASE_PATH}/room-reverb`;
 
   return (
     <header class="border-b border-border-subtle">
@@ -60,6 +61,12 @@ export function Header() {
             class={`${NAV_LINK_CLASS} ${normalizePath(path) === normalizePath(alignmentHref) ? NAV_LINK_ACTIVE_CLASS : ''}`}
           >
             Audio Alignment
+          </a>
+          <a
+            href={roomReverbHref}
+            class={`${NAV_LINK_CLASS} ${normalizePath(path) === normalizePath(roomReverbHref) ? NAV_LINK_ACTIVE_CLASS : ''}`}
+          >
+            Room Reverb
           </a>
         </nav>
 
