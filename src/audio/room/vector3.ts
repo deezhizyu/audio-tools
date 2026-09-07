@@ -50,16 +50,3 @@ export function randomHemisphereVector(normal: Vector3, randomSource: () => numb
   const candidate = randomUnitVector(randomSource);
   return dotVectors(candidate, normal) < 0 ? scaleVector(candidate, -1) : candidate;
 }
-
-/** Closest point to `point` on the segment from `segmentStart` to `segmentEnd`, returned as the fraction along
-    the segment (clamped to [0, 1]) rather than the point itself, since callers need that fraction to convert
-    back into a travel distance. */
-export function closestFractionOnSegment(segmentStart: Vector3, segmentEnd: Vector3, point: Vector3): number {
-  const segment = { x: segmentEnd.x - segmentStart.x, y: segmentEnd.y - segmentStart.y, z: segmentEnd.z - segmentStart.z };
-  const segmentLengthSquared = dotVectors(segment, segment);
-  if (segmentLengthSquared < 1e-12) return 0;
-
-  const toPoint = { x: point.x - segmentStart.x, y: point.y - segmentStart.y, z: point.z - segmentStart.z };
-  const fraction = dotVectors(toPoint, segment) / segmentLengthSquared;
-  return Math.min(1, Math.max(0, fraction));
-}

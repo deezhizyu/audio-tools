@@ -3,8 +3,12 @@ import type { FrequencyBandValues } from './roomTypes';
 export const SPEED_OF_SOUND_METERS_PER_SECOND = 343;
 
 /** Ray count/bounce budget chosen to stay comfortably sub-second off the main thread while still producing a
-    dense enough reflection pattern to sound like a real room rather than a handful of discrete echoes. */
-export const NUMBER_OF_RAYS = 6000;
+    dense enough reflection pattern to sound like a real room rather than a handful of discrete echoes.
+    Rays contribute to the listener via next-event estimation (see `traceRays.ts`) rather than by wandering
+    into a capture radius, so far fewer rays are needed than a receiver-sphere approach would require to
+    reach the same density — every bounce with line of sight to the listener counts, not just the rare one
+    that happens to graze a fixed sphere around it. */
+export const NUMBER_OF_RAYS = 2048;
 export const MAXIMUM_BOUNCES = 60;
 export const MINIMUM_ENERGY_THRESHOLD = 1e-4;
 
@@ -20,11 +24,10 @@ export const MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS = 3;
     bouncing for the full window regardless of the room's scale. */
 export const MAXIMUM_RAY_DISTANCE_METERS = MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS * SPEED_OF_SOUND_METERS_PER_SECOND;
 
-/** Rays are captured when they pass within this radius of the listener, weighted down by how much of the
-    expanding wavefront that radius represents at the travel distance reached — see `traceRays.ts`. Larger than
-    a "physically accurate" microphone would be, since a bigger capture radius is what keeps large rooms (where
-    the same ray count is spread over more volume) from under-sampling arrivals near the listener. */
-export const RECEIVER_RADIUS_METERS = 0.75;
+/** Floor on the hit-point-to-listener distance used when computing a reflection's inverse-square falloff (see
+    `traceRays.ts`), so a bounce landing right next to the listener doesn't produce a divide-by-near-zero
+    energy spike. Mirrors the role of Steam Audio's `irradianceMinDistance`. */
+export const MINIMUM_CONTRIBUTION_DISTANCE_METERS = 0.25;
 
 /** Fraction of each bounce's reflection that scatters into a random direction instead of reflecting purely
     specularly — real surfaces are never perfect mirrors, and a little diffusion avoids an unnaturally metallic-
