@@ -60,11 +60,16 @@ const COINCIDENT_POINT_EPSILON_METERS = 1e-9;
 
 const OCCLUSION_EPSILON_METERS = 1e-6;
 
+/** `hitFromInside: true` lets a box double as a room's enclosing shell: a ray whose origin sits inside a box
+    (e.g. because the source/listener were placed inside one big bounding box instead of surrounded by separate
+    wall slabs) bounces off that box's inner surface rather than passing straight through it — see
+    `rayBoxIntersection.ts`. This has no effect on the ordinary case (a ray outside a box approaching it), so it
+    doesn't change behavior for the usual "separate wall boxes with open space between them" room layout. */
 function findNearestHit(ray: Ray, boxes: RoomBox[]): { box: RoomBox; distance: number; normal: Vector3 } | null {
   let nearest: { box: RoomBox; distance: number; normal: Vector3 } | null = null;
 
   for (const box of boxes) {
-    const intersection = intersectRayWithBox(ray, toAxisAlignedBox(box));
+    const intersection = intersectRayWithBox(ray, toAxisAlignedBox(box), { hitFromInside: true });
     if (intersection && (!nearest || intersection.distance < nearest.distance)) {
       nearest = { box, distance: intersection.distance, normal: intersection.normal };
     }

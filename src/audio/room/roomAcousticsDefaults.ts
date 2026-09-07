@@ -15,6 +15,16 @@ export const MINIMUM_ENERGY_THRESHOLD = 1e-4;
 export const HISTOGRAM_BIN_DURATION_SECONDS = 0.005;
 export const MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS = 3;
 
+/** Reflections arriving before this many seconds after the source starts are kept as individually-timed
+    discrete impulses (see `stampDiscreteReflectionImpulses.ts`) rather than being folded into the statistical,
+    noise-based late-reverb tail (`synthesizeImpulseResponseFromHistogram.ts`). Early reflections are few enough
+    and loud enough to be heard as distinct echoes that define a room's size and shape; smearing them into noise
+    from the very first bin is what made reflections sound washy/distant even once their overall energy was
+    correctly balanced against the direct sound. 80ms sits within the usual range (50-100ms) after which
+    reflection density gets high enough for individual echoes to stop being perceptible on their own — the same
+    "mixing time" split real geometric-acoustics engines (including Steam Audio's hybrid reverb) use. */
+export const EARLY_REFLECTION_TRANSITION_TIME_SECONDS = 0.08;
+
 /** A ray's distance budget is derived directly from how much of the impulse response we're actually filling —
     not an arbitrary flat number. A fixed distance cap (this used to be a flat 200m) silently favors small
     rooms: a bounce in a small room only costs a couple of meters, so many bounces fit under any reasonable

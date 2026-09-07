@@ -62,6 +62,19 @@ describe('traceRays', () => {
     expect(arrivals).toHaveLength(0);
   });
 
+  test('a single enclosing box works as a room: a ray bounces off its inner surface instead of passing through', () => {
+    // Source and listener both sit inside one big box (a 20m room), instead of being surrounded by separate
+    // wall slabs. The ray (heading -x) must reflect off the box's inner wall at x=-10 and travel back to the
+    // listener — if the box were still only hit-testable from outside, this would report zero arrivals.
+    const enclosingRoom = buildWallBox({ x: -10, y: -10, z: -10, width: 20, height: 20, depth: 20 });
+    const scene: RoomScene = { boxes: [enclosingRoom], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const arrivals = traceRays(scene, buildParams());
+
+    expect(arrivals).toHaveLength(1);
+    // source(5) -> inner wall at x=-10 is 15m, wall -> listener(8) is 18m.
+    expect(arrivals[0].timeSeconds).toBeCloseTo(33 / 343, 3);
+  });
+
   test('close source and listener no longer flood the histogram with spurious near-zero-time energy', () => {
     // Regression test for the muffling bug: previously, any ray whose very first segment (before bouncing off
     // anything) passed within a fixed receiver radius of the listener recorded a spurious arrival — so a
