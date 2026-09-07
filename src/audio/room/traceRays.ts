@@ -97,11 +97,17 @@ function hasLineOfSightToListener(from: Vector3, listener: Vector3, distance: nu
     the listener (which starves nearby listeners of samples and, worse, lets a ray's very first, pre-bounce
     segment "capture" spurious energy when the listener happens to sit close to the source), every bounce
     fires one deterministic shadow ray straight at the listener. If it's unobstructed, the bounce contributes
-    energy scaled by the same physics that governs any reflection reaching a point: it falls off with the
-    inverse square of distance, and with how directly the surface faces the listener (a grazing reflection
-    spreads its energy over a wider angle than one that faces the listener head-on). This is the same
-    technique real-time geometric-acoustics engines (e.g. Steam Audio) use to avoid exactly this "rays miss
-    the listener" failure mode. */
+    energy via a normalized Lambertian term: `scatterAmount / π` is the fraction of the bounce's energy that
+    a perfectly diffuse reflection would radiate per steradian (the `1/π` keeps the hemisphere integral of that
+    lobe energy-conserving rather than energy-inflating), scaled by `scatterAmount` because only the diffusely
+    -scattered share of a reflection plausibly reaches an arbitrary point in a single hop — the specular
+    remainder keeps traveling with the traced ray itself and can only reach the listener via a later bounce.
+    That's then weighted by the usual inverse-square falloff and the cosine of how directly the surface faces
+    the listener. This overall technique — deterministic shadow rays instead of hoping a ray wanders close
+    enough — is what real-time geometric-acoustics engines (e.g. Steam Audio) use to avoid exactly the "rays
+    miss the listener" failure mode; the Lambertian normalization is standard energy-conserving diffuse BRDF
+    math, without which every bounce (not just the rare lucky ones) massively over-contributes and the
+    reflection tail drowns out the direct sound. */
 function recordReflectionArrival(
   hitPoint: Vector3,
   hitNormal: Vector3,
@@ -125,7 +131,8 @@ function recordReflectionArrival(
   if (!hasLineOfSightToListener(originPoint, listener, distanceToListener, boxes)) return;
 
   const clampedDistance = Math.max(distanceToListener, params.minimumContributionDistanceMeters);
-  const attenuation = cosineWeight / (clampedDistance * clampedDistance);
+  const diffuseLobeWeight = (params.scatterAmount / Math.PI) * cosineWeight;
+  const attenuation = diffuseLobeWeight / (clampedDistance * clampedDistance);
   const totalDistance = distanceTraveledToHit + distanceToListener;
 
   arrivals.push({
