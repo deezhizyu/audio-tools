@@ -50,4 +50,30 @@ describe('intersectRayWithBox', () => {
     const hit = intersectRayWithBox({ origin: { x: 0, y: 0, z: 0 }, direction: { x: 1, y: 0, z: 0 } }, buildUnitBox());
     expect(hit).toBeNull();
   });
+
+  describe('hitFromInside', () => {
+    test('reports the exit face with an inward-facing normal for a ray starting inside the box', () => {
+      const hit = intersectRayWithBox({ origin: { x: 0, y: 0, z: 0 }, direction: { x: 1, y: 0, z: 0 } }, buildUnitBox(), { hitFromInside: true });
+
+      expect(hit).not.toBeNull();
+      expect(hit!.distance).toBeCloseTo(1);
+      expect(hit!.normal).toEqual({ x: -1, y: 0, z: 0 });
+    });
+
+    test('reports the correct exit face regardless of which direction the ray travels', () => {
+      const hit = intersectRayWithBox({ origin: { x: 0, y: 0, z: 0 }, direction: { x: -1, y: 0, z: 0 } }, buildUnitBox(), { hitFromInside: true });
+
+      expect(hit).not.toBeNull();
+      expect(hit!.distance).toBeCloseTo(1);
+      expect(hit!.normal).toEqual({ x: 1, y: 0, z: 0 });
+    });
+
+    test('does not change behavior for a ray genuinely outside the box', () => {
+      const hit = intersectRayWithBox({ origin: { x: -5, y: 0, z: 0 }, direction: { x: 1, y: 0, z: 0 } }, buildUnitBox(), { hitFromInside: true });
+
+      expect(hit).not.toBeNull();
+      expect(hit!.distance).toBeCloseTo(4);
+      expect(hit!.normal).toEqual({ x: -1, y: 0, z: 0 });
+    });
+  });
 });

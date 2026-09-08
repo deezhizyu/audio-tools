@@ -1,6 +1,8 @@
+import type { ComponentChildren } from 'preact';
+
 interface SectionHeadingProps {
   title: string;
-  description?: string;
+  description?: ComponentChildren;
   accentColor?: string;
 }
 
