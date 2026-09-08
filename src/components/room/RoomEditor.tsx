@@ -142,7 +142,15 @@ export function RoomEditor() {
   return (
     <Card class="flex flex-col gap-5">
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <SectionHeading title="Room" description="Draw walls and absorbers, then place the source and listener dots." />
+        <SectionHeading
+          title="Room"
+          description={
+            <>
+              Draw walls and absorbers, then place the <span class="text-accent">source</span> and{' '}
+              <span class="text-text-primary">listener</span> dots.
+            </>
+          }
+        />
         <div class="flex flex-wrap gap-2">
           {TOOL_OPTIONS.map(({ tool, label }) => (
             <Button key={tool} variant={activeTool === tool ? 'primary' : 'secondary'} onClick={() => setActiveRoomEditorTool(tool)}>
