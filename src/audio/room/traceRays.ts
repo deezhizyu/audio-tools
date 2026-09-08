@@ -1,4 +1,4 @@
-import { intersectRayWithBox, type Ray } from './rayBoxIntersection';
+import { intersectRayWithBox, type AxisAlignedBox, type Ray } from './rayBoxIntersection';
 import { toAxisAlignedBox } from './roomBoxGeometry';
 import {
   MAXIMUM_BOUNCES,
@@ -60,16 +60,28 @@ const COINCIDENT_POINT_EPSILON_METERS = 1e-9;
 
 const OCCLUSION_EPSILON_METERS = 1e-6;
 
+/** A box paired with its axis-aligned bounds, computed once per `traceRays` call rather than on every one of
+    the millions of ray-box tests a simulation runs — the boxes never move during a single simulation, so
+    reconstructing this six-number object from scratch on every test was pure, avoidable allocation churn. */
+interface BoxWithBounds {
+  box: RoomBox;
+  bounds: AxisAlignedBox;
+}
+
+function toBoxesWithBounds(boxes: RoomBox[]): BoxWithBounds[] {
+  return boxes.map(box => ({ box, bounds: toAxisAlignedBox(box) }));
+}
+
 /** `hitFromInside: true` lets a box double as a room's enclosing shell: a ray whose origin sits inside a box
     (e.g. because the source/listener were placed inside one big bounding box instead of surrounded by separate
     wall slabs) bounces off that box's inner surface rather than passing straight through it — see
     `rayBoxIntersection.ts`. This has no effect on the ordinary case (a ray outside a box approaching it), so it
     doesn't change behavior for the usual "separate wall boxes with open space between them" room layout. */
-function findNearestHit(ray: Ray, boxes: RoomBox[]): { box: RoomBox; distance: number; normal: Vector3 } | null {
+function findNearestHit(ray: Ray, boxes: BoxWithBounds[]): { box: RoomBox; distance: number; normal: Vector3 } | null {
   let nearest: { box: RoomBox; distance: number; normal: Vector3 } | null = null;
 
-  for (const box of boxes) {
-    const intersection = intersectRayWithBox(ray, toAxisAlignedBox(box), { hitFromInside: true });
+  for (const { box, bounds } of boxes) {
+    const intersection = intersectRayWithBox(ray, bounds, { hitFromInside: true });
     if (intersection && (!nearest || intersection.distance < nearest.distance)) {
       nearest = { box, distance: intersection.distance, normal: intersection.normal };
     }
@@ -88,12 +100,12 @@ function maximumBandValue(values: FrequencyBandValues): number {
 
 /** Whether a straight line from `from` to `listener` is unobstructed by any box — the shadow ray of a
     next-event-estimation reflection contribution (see `recordReflectionArrival` below). */
-function hasLineOfSightToListener(from: Vector3, listener: Vector3, distance: number, boxes: RoomBox[]): boolean {
+function hasLineOfSightToListener(from: Vector3, listener: Vector3, distance: number, boxes: BoxWithBounds[]): boolean {
   if (distance < COINCIDENT_POINT_EPSILON_METERS) return true;
 
   const direction = normalizeVector({ x: listener.x - from.x, y: listener.y - from.y, z: listener.z - from.z });
-  return !boxes.some(box => {
-    const hit = intersectRayWithBox({ origin: from, direction }, toAxisAlignedBox(box));
+  return !boxes.some(({ bounds }) => {
+    const hit = intersectRayWithBox({ origin: from, direction }, bounds);
     return hit !== null && hit.distance < distance - OCCLUSION_EPSILON_METERS;
   });
 }
@@ -119,7 +131,7 @@ function recordReflectionArrival(
   distanceTraveledToHit: number,
   energyAtHit: FrequencyBandValues,
   listener: Vector3,
-  boxes: RoomBox[],
+  boxes: BoxWithBounds[],
   params: RayTracingParams,
   arrivals: ImpulseArrival[],
 ): void {
@@ -155,6 +167,7 @@ function recordReflectionArrival(
     never sampled here. */
 export function traceRays(scene: RoomScene, params: RayTracingParams): ImpulseArrival[] {
   const arrivals: ImpulseArrival[] = [];
+  const boxes = toBoxesWithBounds(scene.boxes);
 
   for (let rayIndex = 0; rayIndex < params.numberOfRays; rayIndex++) {
     let position = { ...scene.source };
@@ -163,7 +176,7 @@ export function traceRays(scene: RoomScene, params: RayTracingParams): ImpulseAr
     let distanceTraveled = 0;
 
     for (let bounce = 0; bounce < params.maximumBounces; bounce++) {
-      const hit = findNearestHit({ origin: position, direction }, scene.boxes);
+      const hit = findNearestHit({ origin: position, direction }, boxes);
       const remainingBudget = params.maximumDistanceMeters - distanceTraveled;
       if (!hit || hit.distance > remainingBudget) break;
 
@@ -178,7 +191,7 @@ export function traceRays(scene: RoomScene, params: RayTracingParams): ImpulseAr
         high: energy.high * (1 - hit.box.absorption.high),
       };
 
-      recordReflectionArrival(hitPoint, hit.normal, distanceTraveled, energyAfterAbsorption, scene.listener, scene.boxes, params, arrivals);
+      recordReflectionArrival(hitPoint, hit.normal, distanceTraveled, energyAfterAbsorption, scene.listener, boxes, params, arrivals);
 
       if (maximumBandValue(energyAfterAbsorption) < params.minimumEnergyThreshold) break;
       energy = energyAfterAbsorption;
