@@ -44,5 +44,13 @@ export const MINIMUM_CONTRIBUTION_DISTANCE_METERS = 0.25;
     sounding tail built from too-regular specular paths. */
 export const SCATTER_AMOUNT = 0.15;
 
-export const DEFAULT_WALL_ABSORPTION: FrequencyBandValues = { low: 0.1, mid: 0.1, high: 0.15 };
+/** 0.1/0.1/0.15 (bare concrete/tile) made a freshly-drawn room, before anyone touches the per-wall absorption
+    sliders, extremely live: for a modest room and a source/listener a couple of meters apart, measurement
+    against this simulator showed the reverberant tail carrying roughly 15-17x the direct sound's total energy
+    at that absorption — matching the classical room-acoustics "critical distance" formula for a room that
+    reflective, not a bug in the simulation. Raised to a "lightly furnished room" ballpark (carpet, some soft
+    furnishings) where the same test geometry lands closer to 5x, so the out-of-the-box result reads as "a room
+    with reverb" rather than "an empty tiled hallway." Existing walls keep whatever absorption they were drawn
+    with — this only changes what new walls start at. */
+export const DEFAULT_WALL_ABSORPTION: FrequencyBandValues = { low: 0.25, mid: 0.25, high: 0.3 };
 export const DEFAULT_ABSORBER_ABSORPTION: FrequencyBandValues = { low: 0.9, mid: 0.95, high: 0.98 };
