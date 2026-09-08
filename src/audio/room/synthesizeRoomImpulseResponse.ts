@@ -34,7 +34,7 @@ export function synthesizeRoomImpulseResponse(scene: RoomScene, sampleRate: numb
     rayTracingParams.randomSource,
   );
 
-  stampDiscreteReflectionImpulses(impulseResponse, earlyArrivals, sampleRate);
+  stampDiscreteReflectionImpulses(impulseResponse, earlyArrivals, sampleRate, rayTracingParams.numberOfRays);
 
   return impulseResponse;
 }
