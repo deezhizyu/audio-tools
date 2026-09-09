@@ -18,16 +18,18 @@ function buildParams(overrides: Partial<RayTracingParams> = {}): RayTracingParam
     minimumContributionDistanceMeters: 0.25,
     minimumEnergyThreshold: 1e-4,
     maximumDistanceMeters: 200,
-    scatterAmount: 0.15,
     randomSource: FIXED_RANDOM_SOURCE,
     ...overrides,
   };
 }
 
-function buildWallBox(overrides: Partial<RoomBox> = {}): RoomBox {
+/** Uses the `generic-object` material, whose `scatterAmount` (0.15) matches what used to be the single global
+    `SCATTER_AMOUNT` constant — so with `textureIntensity: 1` (the default), this fixture reproduces the exact
+    pre-materials physics these tests were originally written against. */
+function buildObjectBox(overrides: Partial<RoomBox> = {}): RoomBox {
   return {
     id: 'box-1',
-    kind: 'wall',
+    kind: 'object',
     x: -1,
     y: -1,
     z: -1,
@@ -35,15 +37,17 @@ function buildWallBox(overrides: Partial<RoomBox> = {}): RoomBox {
     height: 2,
     depth: 2,
     absorption: { low: 0.1, mid: 0.1, high: 0.1 },
+    materialId: 'generic-object',
+    textureIntensity: 1,
     ...overrides,
   };
 }
 
 describe('synthesizeRoomImpulseResponse', () => {
   test('an early reflection lands as an exact discrete impulse, not smeared noise', () => {
-    // Same geometry as traceRays.test.ts's basic bounce case: source(5,0,0) -> wall hit(1,0,0) -> listener(8,0,0),
+    // Same geometry as traceRays.test.ts's basic bounce case: source(5,0,0) -> object hit(1,0,0) -> listener(8,0,0),
     // an 11m path arriving at ~32ms — well before the 80ms early/late transition.
-    const scene: RoomScene = { boxes: [buildWallBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const scene: RoomScene = { boxes: [buildObjectBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
     const params = buildParams();
 
     const [expectedArrival] = traceRays(scene, params);
@@ -68,8 +72,8 @@ describe('synthesizeRoomImpulseResponse', () => {
     // Pushed far enough out (source -> hit ~53m, hit -> listener ~56m) that the ~318ms arrival falls well past
     // the 80ms transition. With the fixed random source producing exactly zero noise, the late histogram tail
     // contributes silence too, so this reflection should leave no trace anywhere in the buffer.
-    const farWall = buildWallBox({ x: -50, width: 2 });
-    const scene: RoomScene = { boxes: [farWall], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const farObject = buildObjectBox({ x: -50, width: 2 });
+    const scene: RoomScene = { boxes: [farObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
     const params = buildParams();
 
     const [lateArrival] = traceRays(scene, params);

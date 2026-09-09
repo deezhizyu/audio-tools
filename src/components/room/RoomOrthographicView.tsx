@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import {
+  getBoxesIntersectingRect,
   getBoxRectOnAxes,
-  hitTestBox,
+  hitTestAllBoxesAtPoint,
   hitTestResizeHandle,
   resizeBoxOnAxes,
   type OrthographicAxes,
   type Point2D,
+  type Rect2D,
   type ResizeHandle,
 } from '../../audio/room/roomEditorGeometry';
 import type { RoomBox, RoomPoint3D } from '../../audio/room/roomTypes';
@@ -23,7 +25,7 @@ import {
   type ViewTransform,
 } from './roomViewDrawing';
 
-export type RoomEditorTool = 'select' | 'add-wall' | 'add-absorber';
+export type RoomEditorTool = 'select' | 'add-object' | 'add-absorber';
 
 interface RoomOrthographicViewProps {
   label: string;
@@ -31,12 +33,14 @@ interface RoomOrthographicViewProps {
   horizontalAxisLabel: string;
   verticalAxisLabel: string;
   boxes: RoomBox[];
-  selectedBoxId: string | null;
+  selectedBoxIds: ReadonlySet<string>;
   source: RoomPoint3D;
   listener: RoomPoint3D;
   activeTool: RoomEditorTool;
   onSelectBox: (boxId: string | null) => void;
-  onMoveBox: (boxId: string, deltaHorizontal: number, deltaVertical: number) => void;
+  onToggleBoxSelection: (boxId: string) => void;
+  onMarqueeSelect: (boxIds: string[]) => void;
+  onMoveSelectedBoxes: (deltaHorizontal: number, deltaVertical: number) => void;
   onResizeBox: (boxId: string, handle: ResizeHandle, point: Point2D) => void;
   onCreateBox: (startPoint: Point2D, endPoint: Point2D) => void;
   onMoveSource: (point: Point2D) => void;
@@ -50,30 +54,51 @@ const RESIZE_HANDLE_HIT_RADIUS_PIXELS = 9;
     ticks feel smooth rather than jumping by a fixed step regardless of how hard the wheel was spun. */
 const ZOOM_SENSITIVITY = 0.0015;
 /** A plain click almost never has zero movement between pointerdown and pointerup — a sub-pixel hand tremor is
-    normal. Without this threshold, selecting a box also fired a near-zero `onMoveBox`, which schedules a full
+    normal. Without this threshold, selecting a box also fired a near-zero move, which schedules a full
     resimulation just from clicking. Only once the pointer has actually moved past this many pixels does a
-    press-and-drag on a box/marker turn into a real move. */
+    press-and-drag on a box/marker turn into a real move. Also doubles as the "same spot" tolerance for
+    click-through selection cycling below. */
 const CLICK_VS_DRAG_THRESHOLD_PIXELS = 4;
 
 type DragMode =
   | { kind: 'pan'; lastPixelPoint: Point2D }
   | { kind: 'move-source'; startPixelPoint: Point2D; hasCrossedClickThreshold: boolean }
   | { kind: 'move-listener'; startPixelPoint: Point2D; hasCrossedClickThreshold: boolean }
-  | { kind: 'move-box'; boxId: string; lastWorldPoint: Point2D; startPixelPoint: Point2D; hasCrossedClickThreshold: boolean }
+  | {
+      kind: 'move-selected-boxes';
+      /** The box a plain click resolved to, so `handlePointerUp` can collapse a multi-selection down to just
+          this box if the pointer never actually moved (a real click, not a drag) — dragging one member of an
+          existing multi-selection should move the whole group, but merely clicking it (no drag) should still
+          narrow the selection to that one box, matching conventional design-tool behavior. `null` for a
+          Shift+click-started drag, which already applied its own toggle and shouldn't also collapse. */
+      clickedBoxId: string | null;
+      lastWorldPoint: Point2D;
+      startPixelPoint: Point2D;
+      hasCrossedClickThreshold: boolean;
+    }
   | { kind: 'resize-box'; boxId: string; handle: ResizeHandle }
-  | { kind: 'create-box'; startWorldPoint: Point2D };
+  | { kind: 'create-box'; startWorldPoint: Point2D }
+  | { kind: 'marquee'; startWorldPoint: Point2D };
 
 interface SizeLabel {
   pixelPoint: Point2D;
   text: string;
 }
 
+/** Tracks click-through selection cycling (see `resolveClickTarget` below): the screen point and hit stack the
+    last plain click resolved against, and which box in that stack was picked. Kept per-view (a `useRef`, not a
+    shared/global signal) since overlap is a property of this view's own 2D projection — Top/Front/Side each
+    cycle independently. */
+interface ClickCycleState {
+  pixelPoint: Point2D;
+  hitBoxIds: string[];
+  currentIndex: number;
+}
+
 function resolveThemeColors(referenceElement: Element): RoomViewTheme {
   const rootStyle = getComputedStyle(referenceElement);
   return {
     gridColor: rootStyle.getPropertyValue('--color-border-subtle').trim(),
-    wallColor: rootStyle.getPropertyValue('--color-text-secondary').trim(),
-    absorberColor: rootStyle.getPropertyValue('--color-danger').trim(),
     selectedOutlineColor: rootStyle.getPropertyValue('--color-accent').trim(),
     sourceColor: rootStyle.getPropertyValue('--color-accent').trim(),
     listenerColor: rootStyle.getPropertyValue('--color-text-primary').trim(),
@@ -101,18 +126,52 @@ const RESIZE_HANDLE_CURSORS: Record<ResizeHandle, string> = {
   'bottom-left': 'nesw-resize',
 };
 
+function pixelDistance(a: Point2D, b: Point2D): number {
+  return Math.hypot(a.horizontal - b.horizontal, a.vertical - b.vertical);
+}
+
+function haveSameBoxIds(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const bIds = new Set(b);
+  return a.every(id => bIds.has(id));
+}
+
+/** Resolves which box a plain click at `pixelPoint` should select, given every box under the cursor
+    (`hitBoxIds`, topmost first). Clicking the same screen spot again — within `CLICK_VS_DRAG_THRESHOLD_PIXELS`
+    and while the same set of boxes still sits there — advances to the next box underneath, wrapping back to
+    the top; anything else (a different spot, or a hit stack that changed since the last click) restarts at the
+    topmost box. This is how an occluding box (e.g. a ceiling covering everything below it in the Top view) can
+    still be clicked through to reach what's underneath. */
+function resolveClickTarget(previous: ClickCycleState | null, pixelPoint: Point2D, hitBoxIds: string[]): ClickCycleState {
+  const isSameSpot = previous !== null && pixelDistance(previous.pixelPoint, pixelPoint) <= CLICK_VS_DRAG_THRESHOLD_PIXELS;
+  const isSameStack = isSameSpot && haveSameBoxIds(previous!.hitBoxIds, hitBoxIds);
+  const currentIndex = isSameStack ? (previous!.currentIndex + 1) % hitBoxIds.length : 0;
+  return { pixelPoint, hitBoxIds, currentIndex };
+}
+
+function worldRectFromDrag(start: Point2D, end: Point2D): Rect2D {
+  return {
+    left: Math.min(start.horizontal, end.horizontal),
+    top: Math.min(start.vertical, end.vertical),
+    width: Math.abs(end.horizontal - start.horizontal),
+    height: Math.abs(end.vertical - start.vertical),
+  };
+}
+
 export function RoomOrthographicView({
   label,
   axes,
   horizontalAxisLabel,
   verticalAxisLabel,
   boxes,
-  selectedBoxId,
+  selectedBoxIds,
   source,
   listener,
   activeTool,
   onSelectBox,
-  onMoveBox,
+  onToggleBoxSelection,
+  onMarqueeSelect,
+  onMoveSelectedBoxes,
   onResizeBox,
   onCreateBox,
   onMoveSource,
@@ -122,8 +181,10 @@ export function RoomOrthographicView({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const themeRef = useRef<RoomViewTheme | null>(null);
   const dragModeRef = useRef<DragMode | null>(null);
+  const clickCycleRef = useRef<ClickCycleState | null>(null);
   const [transform, setTransform] = useState<ViewTransform>(DEFAULT_VIEW_TRANSFORM);
   const [previewRect, setPreviewRect] = useState<{ start: Point2D; end: Point2D } | null>(null);
+  const [marqueeRect, setMarqueeRect] = useState<{ start: Point2D; end: Point2D } | null>(null);
   const [sizeLabel, setSizeLabel] = useState<SizeLabel | null>(null);
   const [cursorStyle, setCursorStyle] = useState('default');
 
@@ -154,22 +215,22 @@ export function RoomOrthographicView({
         heightPixels: VIEW_HEIGHT_PIXELS,
         boxes,
         axes,
-        selectedBoxId,
+        selectedBoxIds,
         source,
         listener,
         theme: getTheme(canvas),
         transform,
       });
 
-      if (previewRect) {
+      const drawDashedRect = (rect: { start: Point2D; end: Point2D }) => {
         const topLeft = worldToPixel(
-          { horizontal: Math.min(previewRect.start.horizontal, previewRect.end.horizontal), vertical: Math.min(previewRect.start.vertical, previewRect.end.vertical) },
+          { horizontal: Math.min(rect.start.horizontal, rect.end.horizontal), vertical: Math.min(rect.start.vertical, rect.end.vertical) },
           widthPixels,
           VIEW_HEIGHT_PIXELS,
           transform,
         );
         const bottomRight = worldToPixel(
-          { horizontal: Math.max(previewRect.start.horizontal, previewRect.end.horizontal), vertical: Math.max(previewRect.start.vertical, previewRect.end.vertical) },
+          { horizontal: Math.max(rect.start.horizontal, rect.end.horizontal), vertical: Math.max(rect.start.vertical, rect.end.vertical) },
           widthPixels,
           VIEW_HEIGHT_PIXELS,
           transform,
@@ -179,7 +240,10 @@ export function RoomOrthographicView({
         context.lineWidth = 1.5;
         context.strokeRect(topLeft.horizontal, topLeft.vertical, bottomRight.horizontal - topLeft.horizontal, bottomRight.vertical - topLeft.vertical);
         context.setLineDash([]);
-      }
+      };
+
+      if (previewRect) drawDashedRect(previewRect);
+      if (marqueeRect) drawDashedRect(marqueeRect);
     };
 
     draw();
@@ -199,7 +263,7 @@ export function RoomOrthographicView({
       resizeObserver.disconnect();
       if (resizeAnimationFrameId !== null) cancelAnimationFrame(resizeAnimationFrameId);
     };
-  }, [boxes, selectedBoxId, source, listener, axes, previewRect, transform]);
+  }, [boxes, selectedBoxIds, source, listener, axes, previewRect, marqueeRect, transform]);
 
   const eventToPixelPoint = (event: { offsetX: number; offsetY: number }): Point2D => ({ horizontal: event.offsetX, vertical: event.offsetY });
 
@@ -218,8 +282,12 @@ export function RoomOrthographicView({
     return null;
   };
 
+  /** Resize handles only appear/respond when exactly one box is selected — resizing a multi-selection isn't
+      meaningful (there's no single shape to drag a corner of), so it stays a single-box-only operation. */
   const findResizeHandleUnderPoint = (point: Point2D): { box: RoomBox; handle: ResizeHandle } | null => {
-    const selectedBox = boxes.find(box => box.id === selectedBoxId);
+    if (selectedBoxIds.size !== 1) return null;
+    const [onlySelectedId] = selectedBoxIds;
+    const selectedBox = boxes.find(box => box.id === onlySelectedId);
     if (!selectedBox) return null;
     const widthPixels = containerRef.current?.clientWidth ?? 1;
     const resizeHandleRadiusWorld = RESIZE_HANDLE_HIT_RADIUS_PIXELS / pixelsPerMeter(widthPixels, transform.spanMeters);
@@ -269,11 +337,35 @@ export function RoomOrthographicView({
       return;
     }
 
-    const hitBox = hitTestBox(point, boxes, axes);
-    onSelectBox(hitBox?.id ?? null);
-    if (hitBox) {
-      dragModeRef.current = { kind: 'move-box', boxId: hitBox.id, lastWorldPoint: point, startPixelPoint: pixelPoint, hasCrossedClickThreshold: false };
+    const hitStack = hitTestAllBoxesAtPoint(point, boxes, axes);
+
+    if (event.shiftKey) {
+      clickCycleRef.current = null;
+      if (hitStack.length === 0) return; // Shift+click on empty space is a no-op — Shift is strictly a toggle gesture.
+      const topHit = hitStack[0];
+      const wasSelected = selectedBoxIds.has(topHit.id);
+      onToggleBoxSelection(topHit.id);
+      if (!wasSelected) {
+        dragModeRef.current = { kind: 'move-selected-boxes', clickedBoxId: null, lastWorldPoint: point, startPixelPoint: pixelPoint, hasCrossedClickThreshold: false };
+      }
+      return;
     }
+
+    if (hitStack.length === 0) {
+      clickCycleRef.current = null;
+      dragModeRef.current = { kind: 'marquee', startWorldPoint: point };
+      setMarqueeRect({ start: point, end: point });
+      return;
+    }
+
+    const cycleState = resolveClickTarget(clickCycleRef.current, pixelPoint, hitStack.map(box => box.id));
+    clickCycleRef.current = cycleState;
+    const resolvedBox = hitStack[cycleState.currentIndex];
+    // A box that's already part of the current selection (single or multi) keeps the whole selection intact
+    // for now — dragging it should move the whole group. Only a box outside the current selection replaces it
+    // immediately, so an unselected box highlights right away even before any drag starts.
+    if (!selectedBoxIds.has(resolvedBox.id)) onSelectBox(resolvedBox.id);
+    dragModeRef.current = { kind: 'move-selected-boxes', clickedBoxId: resolvedBox.id, lastWorldPoint: point, startPixelPoint: pixelPoint, hasCrossedClickThreshold: false };
   };
 
   const updateHoverCursor = (point: Point2D) => {
@@ -319,13 +411,13 @@ export function RoomOrthographicView({
         else onMoveListener(point);
         break;
       }
-      case 'move-box': {
+      case 'move-selected-boxes': {
         if (!dragMode.hasCrossedClickThreshold) {
           const distance = Math.hypot(pixelPoint.horizontal - dragMode.startPixelPoint.horizontal, pixelPoint.vertical - dragMode.startPixelPoint.vertical);
           if (distance < CLICK_VS_DRAG_THRESHOLD_PIXELS) return;
           dragModeRef.current = { ...dragMode, hasCrossedClickThreshold: true };
         }
-        onMoveBox(dragMode.boxId, point.horizontal - dragMode.lastWorldPoint.horizontal, point.vertical - dragMode.lastWorldPoint.vertical);
+        onMoveSelectedBoxes(point.horizontal - dragMode.lastWorldPoint.horizontal, point.vertical - dragMode.lastWorldPoint.vertical);
         dragModeRef.current = { ...dragMode, lastWorldPoint: point, hasCrossedClickThreshold: true };
         break;
       }
@@ -342,6 +434,9 @@ export function RoomOrthographicView({
         setPreviewRect({ start: dragMode.startWorldPoint, end: point });
         setSizeLabel({ pixelPoint, text: formatSizeLabel(Math.abs(point.horizontal - dragMode.startWorldPoint.horizontal), Math.abs(point.vertical - dragMode.startWorldPoint.vertical)) });
         break;
+      case 'marquee':
+        setMarqueeRect({ start: dragMode.startWorldPoint, end: point });
+        break;
     }
   };
 
@@ -351,6 +446,19 @@ export function RoomOrthographicView({
       const point = pixelToWorldHere(eventToPixelPoint(event));
       onCreateBox(dragMode.startWorldPoint, point);
       setPreviewRect(null);
+    }
+    if (dragMode?.kind === 'marquee') {
+      const point = pixelToWorldHere(eventToPixelPoint(event));
+      const intersecting = getBoxesIntersectingRect(worldRectFromDrag(dragMode.startWorldPoint, point), boxes, axes);
+      onMarqueeSelect(intersecting.map(box => box.id));
+      setMarqueeRect(null);
+    }
+    // A plain click (never crossed the drag threshold) on a box that was already part of a multi-selection
+    // didn't touch the selection at pointerdown, to keep a potential group-drag possible — now that the
+    // pointer is up without ever having moved, it resolves to what a plain click normally does: narrow the
+    // selection down to just that one box.
+    if (dragMode?.kind === 'move-selected-boxes' && !dragMode.hasCrossedClickThreshold && dragMode.clickedBoxId !== null) {
+      onSelectBox(dragMode.clickedBoxId);
     }
     dragModeRef.current = null;
     setSizeLabel(null);

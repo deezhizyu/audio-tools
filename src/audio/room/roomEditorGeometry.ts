@@ -1,4 +1,4 @@
-import type { FrequencyBandValues, RoomBox, RoomBoxKind } from './roomTypes';
+import type { FrequencyBandValues, RoomBox, RoomBoxKind, RoomMaterialId } from './roomTypes';
 
 export type RoomAxis = 'x' | 'y' | 'z';
 export type ResizeHandle = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
@@ -56,13 +56,33 @@ function isPointInRect(point: Point2D, rect: Rect2D): boolean {
   );
 }
 
+/** Every box containing the point, topmost (last-drawn) first — lets the caller cycle through an occluded
+    stack (e.g. clicking through a ceiling to reach a box underneath) instead of only ever reaching the top
+    hit. */
+export function hitTestAllBoxesAtPoint(point: Point2D, boxes: RoomBox[], axes: OrthographicAxes): RoomBox[] {
+  const hits: RoomBox[] = [];
+  for (let index = boxes.length - 1; index >= 0; index--) {
+    if (isPointInRect(point, getBoxRectOnAxes(boxes[index], axes))) hits.push(boxes[index]);
+  }
+  return hits;
+}
+
 /** The topmost (last-drawn) box containing the point, matching how a click should resolve when boxes overlap
     in this view's projection. */
 export function hitTestBox(point: Point2D, boxes: RoomBox[], axes: OrthographicAxes): RoomBox | null {
-  for (let index = boxes.length - 1; index >= 0; index--) {
-    if (isPointInRect(point, getBoxRectOnAxes(boxes[index], axes))) return boxes[index];
-  }
-  return null;
+  return hitTestAllBoxesAtPoint(point, boxes, axes)[0] ?? null;
+}
+
+/** Whether two axis-projected rects overlap at all (including edge-touching), used for marquee/rubber-band
+    selection. */
+export function doRectsIntersect(a: Rect2D, b: Rect2D): boolean {
+  return a.left <= b.left + b.width && a.left + a.width >= b.left && a.top <= b.top + b.height && a.top + a.height >= b.top;
+}
+
+/** Every box whose projected rect intersects the given rect, in no particular order — used to resolve a
+    marquee/rubber-band selection drag. */
+export function getBoxesIntersectingRect(rect: Rect2D, boxes: RoomBox[], axes: OrthographicAxes): RoomBox[] {
+  return boxes.filter(box => doRectsIntersect(rect, getBoxRectOnAxes(box, axes)));
 }
 
 const RESIZE_HANDLES: ResizeHandle[] = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
@@ -121,6 +141,7 @@ export function resizeBoxOnAxes(box: RoomBox, axes: OrthographicAxes, handle: Re
 export function createBoxFromDrag(
   id: string,
   kind: RoomBoxKind,
+  materialId: RoomMaterialId,
   absorption: FrequencyBandValues,
   startPoint: Point2D,
   endPoint: Point2D,
@@ -134,5 +155,5 @@ export function createBoxFromDrag(
   position[axes.vertical] = Math.min(startPoint.vertical, endPoint.vertical);
   size[axes.vertical] = Math.max(MINIMUM_BOX_SIZE_METERS, Math.abs(endPoint.vertical - startPoint.vertical));
 
-  return { id, kind, absorption, x: position.x, y: position.y, z: position.z, width: size.x, height: size.y, depth: size.z };
+  return { id, kind, materialId, textureIntensity: 1, absorption, x: position.x, y: position.y, z: position.z, width: size.x, height: size.y, depth: size.z };
 }

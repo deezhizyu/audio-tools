@@ -1,5 +1,7 @@
+import { getRoomMaterial } from '../../audio/room/roomMaterials';
 import type { RoomBox, RoomPoint3D } from '../../audio/room/roomTypes';
 import { getBoxRectOnAxes, type OrthographicAxes, type Point2D, type Rect2D } from '../../audio/room/roomEditorGeometry';
+import { drawMaterialTexture } from './roomViewTextures';
 
 /** How many world meters are visible across the canvas width, and which world point sits at the canvas's
     center — together these define one view's pan/zoom state. Kept per-view (not global), since panning the
@@ -18,8 +20,6 @@ const MARKER_RADIUS_PIXELS = 6;
 
 export interface RoomViewTheme {
   gridColor: string;
-  wallColor: string;
-  absorberColor: string;
   selectedOutlineColor: string;
   sourceColor: string;
   listenerColor: string;
@@ -30,7 +30,7 @@ export interface RoomViewDrawParams {
   heightPixels: number;
   boxes: RoomBox[];
   axes: OrthographicAxes;
-  selectedBoxId: string | null;
+  selectedBoxIds: ReadonlySet<string>;
   source: RoomPoint3D;
   listener: RoomPoint3D;
   theme: RoomViewTheme;
@@ -169,17 +169,21 @@ function drawBox(context: CanvasRenderingContext2D, box: RoomBox, params: RoomVi
   const pixelWidth = bottomRight.horizontal - topLeft.horizontal;
   const pixelHeight = bottomRight.vertical - topLeft.vertical;
 
-  const fillColor = box.kind === 'wall' ? params.theme.wallColor : params.theme.absorberColor;
+  const fillColor = getRoomMaterial(box.materialId).color;
   context.globalAlpha = 0.35;
   context.fillStyle = fillColor;
   context.fillRect(topLeft.horizontal, topLeft.vertical, pixelWidth, pixelHeight);
   context.globalAlpha = 1;
 
+  drawMaterialTexture(context, box, rect, { left: topLeft.horizontal, top: topLeft.vertical, width: pixelWidth, height: pixelHeight }, point =>
+    worldToPixel(point, params.widthPixels, params.heightPixels, params.transform),
+  );
+
   context.strokeStyle = isSelected ? params.theme.selectedOutlineColor : fillColor;
   context.lineWidth = isSelected ? 2.5 : 1.5;
   context.strokeRect(topLeft.horizontal, topLeft.vertical, pixelWidth, pixelHeight);
 
-  if (isSelected) drawResizeHandles(context, rect, params);
+  if (isSelected && params.selectedBoxIds.size === 1) drawResizeHandles(context, rect, params);
 }
 
 function drawMarker(context: CanvasRenderingContext2D, point: Point2D, color: string): void {
@@ -197,7 +201,7 @@ export function drawRoomOrthographicView(context: CanvasRenderingContext2D, para
   drawGrid(context, params.widthPixels, params.heightPixels, params.transform, params.theme.gridColor);
 
   for (const box of params.boxes) {
-    drawBox(context, box, params, box.id === params.selectedBoxId);
+    drawBox(context, box, params, params.selectedBoxIds.has(box.id));
   }
 
   drawMarker(

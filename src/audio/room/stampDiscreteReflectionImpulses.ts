@@ -15,7 +15,7 @@ import type { ImpulseArrival } from './traceRays';
  * fully applies to the late tail.
  *
  * Each of `numberOfRays` traced rays independently discovers (via next-event estimation) essentially the same
- * handful of early reflection paths — many rays bounce off the same nearby wall and each fires its own shadow
+ * handful of early reflection paths — many rays bounce off the same nearby object and each fires its own shadow
  * ray to the listener — so summing their raw contributions would make the early region louder the more rays
  * are fired, rather than converging to a stable result. `buildEnergyHistogram.ts` avoids exactly this by
  * dividing by `numberOfRays` before turning energy into amplitude; this does the same, so the early, discrete

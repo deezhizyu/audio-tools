@@ -1,4 +1,5 @@
 import { intersectRayWithBox, type AxisAlignedBox, type Ray } from './rayBoxIntersection';
+import { getEffectiveScatterAmount } from './roomMaterials';
 import { toAxisAlignedBox } from './roomBoxGeometry';
 import {
   MAXIMUM_BOUNCES,
@@ -6,7 +7,6 @@ import {
   MINIMUM_CONTRIBUTION_DISTANCE_METERS,
   MINIMUM_ENERGY_THRESHOLD,
   NUMBER_OF_RAYS,
-  SCATTER_AMOUNT,
   SPEED_OF_SOUND_METERS_PER_SECOND,
 } from './roomAcousticsDefaults';
 import type { FrequencyBandValues, RoomBox, RoomScene } from './roomTypes';
@@ -29,7 +29,6 @@ export interface RayTracingParams {
   minimumContributionDistanceMeters: number;
   minimumEnergyThreshold: number;
   maximumDistanceMeters: number;
-  scatterAmount: number;
   /** Injectable so ray directions/scatter are deterministic in tests; defaults to `Math.random`. */
   randomSource: () => number;
 }
@@ -41,7 +40,6 @@ export const DEFAULT_RAY_TRACING_PARAMS: RayTracingParams = {
   minimumContributionDistanceMeters: MINIMUM_CONTRIBUTION_DISTANCE_METERS,
   minimumEnergyThreshold: MINIMUM_ENERGY_THRESHOLD,
   maximumDistanceMeters: MAXIMUM_RAY_DISTANCE_METERS,
-  scatterAmount: SCATTER_AMOUNT,
   randomSource: Math.random,
 };
 
@@ -128,6 +126,7 @@ function hasLineOfSightToListener(from: Vector3, listener: Vector3, distance: nu
 function recordReflectionArrival(
   hitPoint: Vector3,
   hitNormal: Vector3,
+  hitScatterAmount: number,
   distanceTraveledToHit: number,
   energyAtHit: FrequencyBandValues,
   listener: Vector3,
@@ -148,7 +147,7 @@ function recordReflectionArrival(
   if (!hasLineOfSightToListener(originPoint, listener, distanceToListener, boxes)) return;
 
   const clampedDistance = Math.max(distanceToListener, params.minimumContributionDistanceMeters);
-  const diffuseLobeWeight = (params.scatterAmount / Math.PI) * cosineWeight;
+  const diffuseLobeWeight = (hitScatterAmount / Math.PI) * cosineWeight;
   const attenuation = diffuseLobeWeight / (clampedDistance * clampedDistance);
   const totalDistance = distanceTraveledToHit + distanceToListener;
 
@@ -158,10 +157,11 @@ function recordReflectionArrival(
   });
 }
 
-/** Fires `params.numberOfRays` rays from the scene's source in random directions and bounces them off `wall`
-    boxes, losing energy per the hit face's absorption plus a little diffusion so the tail isn't unnaturally
-    metallic. A ray terminates outright on hitting an `absorber` box. Every reflection point contributes a
-    time-stamped, distance- and angle-attenuated energy arrival via next-event estimation (see
+/** Fires `params.numberOfRays` rays from the scene's source in random directions and bounces them off `object`
+    boxes, losing energy per the hit face's absorption plus a per-material amount of diffusion (see
+    `getEffectiveScatterAmount`) so the tail isn't unnaturally metallic and rougher surfaces scatter sound more
+    diffusely than smooth ones. A ray terminates outright on hitting an `absorber` box. Every reflection point
+    contributes a time-stamped, distance- and angle-attenuated energy arrival via next-event estimation (see
     `recordReflectionArrival`) — the raw material `synthesizeImpulseResponseFromHistogram.ts` turns into an
     actual impulse response. The direct, unreflected path is handled separately by `directSound.ts` and is
     never sampled here. */
@@ -191,14 +191,15 @@ export function traceRays(scene: RoomScene, params: RayTracingParams): ImpulseAr
         high: energy.high * (1 - hit.box.absorption.high),
       };
 
-      recordReflectionArrival(hitPoint, hit.normal, distanceTraveled, energyAfterAbsorption, scene.listener, boxes, params, arrivals);
+      const hitScatterAmount = getEffectiveScatterAmount(hit.box);
+      recordReflectionArrival(hitPoint, hit.normal, hitScatterAmount, distanceTraveled, energyAfterAbsorption, scene.listener, boxes, params, arrivals);
 
       if (maximumBandValue(energyAfterAbsorption) < params.minimumEnergyThreshold) break;
       energy = energyAfterAbsorption;
 
       const specularDirection = reflectVector(direction, hit.normal);
       const scatterDirection = randomHemisphereVector(hit.normal, params.randomSource);
-      direction = normalizeMixedDirection(specularDirection, scatterDirection, params.scatterAmount);
+      direction = normalizeMixedDirection(specularDirection, scatterDirection, hitScatterAmount);
       position = addVectors(hitPoint, scaleVector(hit.normal, SURFACE_OFFSET_METERS));
     }
   }

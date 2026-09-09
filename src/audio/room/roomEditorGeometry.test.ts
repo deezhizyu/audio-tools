@@ -1,11 +1,15 @@
 import { describe, expect, test } from 'vitest';
 import {
   createBoxFromDrag,
+  doRectsIntersect,
+  getBoxesIntersectingRect,
+  hitTestAllBoxesAtPoint,
   hitTestBox,
   hitTestResizeHandle,
   moveBoxOnAxes,
   resizeBoxOnAxes,
   type OrthographicAxes,
+  type Rect2D,
 } from './roomEditorGeometry';
 import type { RoomBox } from './roomTypes';
 
@@ -13,7 +17,20 @@ const TOP_VIEW_AXES: OrthographicAxes = { horizontal: 'x', vertical: 'z' };
 const ABSORPTION = { low: 0.1, mid: 0.1, high: 0.1 };
 
 function buildBox(overrides: Partial<RoomBox> = {}): RoomBox {
-  return { id: 'box-1', kind: 'wall', x: 0, y: 0, z: 0, width: 4, height: 2.5, depth: 3, absorption: ABSORPTION, ...overrides };
+  return {
+    id: 'box-1',
+    kind: 'object',
+    x: 0,
+    y: 0,
+    z: 0,
+    width: 4,
+    height: 2.5,
+    depth: 3,
+    absorption: ABSORPTION,
+    materialId: 'generic-object',
+    textureIntensity: 1,
+    ...overrides,
+  };
 }
 
 describe('hitTestBox', () => {
@@ -31,6 +48,26 @@ describe('hitTestBox', () => {
     const back = buildBox({ id: 'back' });
     const front = buildBox({ id: 'front' });
     expect(hitTestBox({ horizontal: 2, vertical: 1 }, [back, front], TOP_VIEW_AXES)).toBe(front);
+  });
+});
+
+describe('hitTestAllBoxesAtPoint', () => {
+  test('returns every overlapping box, topmost first', () => {
+    const back = buildBox({ id: 'back' });
+    const front = buildBox({ id: 'front' });
+    const hits = hitTestAllBoxesAtPoint({ horizontal: 2, vertical: 1 }, [back, front], TOP_VIEW_AXES);
+    expect(hits.map(box => box.id)).toEqual(['front', 'back']);
+  });
+
+  test('returns an empty array when the point falls outside every box', () => {
+    const box = buildBox();
+    expect(hitTestAllBoxesAtPoint({ horizontal: 20, vertical: 20 }, [box], TOP_VIEW_AXES)).toEqual([]);
+  });
+
+  test('a single hit matches what hitTestBox resolves to', () => {
+    const box = buildBox();
+    const hits = hitTestAllBoxesAtPoint({ horizontal: 2, vertical: 1 }, [box], TOP_VIEW_AXES);
+    expect(hits[0]).toBe(hitTestBox({ horizontal: 2, vertical: 1 }, [box], TOP_VIEW_AXES));
   });
 });
 
@@ -86,9 +123,11 @@ describe('resizeBoxOnAxes', () => {
 
 describe('createBoxFromDrag', () => {
   test('builds a box from a drag rectangle, defaulting the unedited axis', () => {
-    const box = createBoxFromDrag('new-box', 'absorber', ABSORPTION, { horizontal: 1, vertical: 1 }, { horizontal: 3, vertical: 4 }, TOP_VIEW_AXES);
+    const box = createBoxFromDrag('new-box', 'absorber', 'generic-absorber', ABSORPTION, { horizontal: 1, vertical: 1 }, { horizontal: 3, vertical: 4 }, TOP_VIEW_AXES);
 
     expect(box.kind).toBe('absorber');
+    expect(box.materialId).toBe('generic-absorber');
+    expect(box.textureIntensity).toBe(1);
     expect(box.x).toBe(1);
     expect(box.width).toBe(2);
     expect(box.z).toBe(1);
@@ -98,10 +137,49 @@ describe('createBoxFromDrag', () => {
   });
 
   test('normalizes a drag made from bottom-right to top-left', () => {
-    const box = createBoxFromDrag('new-box', 'wall', ABSORPTION, { horizontal: 5, vertical: 5 }, { horizontal: 2, vertical: 1 }, TOP_VIEW_AXES);
+    const box = createBoxFromDrag('new-box', 'object', 'generic-object', ABSORPTION, { horizontal: 5, vertical: 5 }, { horizontal: 2, vertical: 1 }, TOP_VIEW_AXES);
     expect(box.x).toBe(2);
     expect(box.width).toBe(3);
     expect(box.z).toBe(1);
     expect(box.depth).toBe(4);
+  });
+});
+
+describe('doRectsIntersect', () => {
+  const rect = (overrides: Partial<Rect2D> = {}): Rect2D => ({ left: 0, top: 0, width: 4, height: 3, ...overrides });
+
+  test('detects a partial overlap', () => {
+    expect(doRectsIntersect(rect(), rect({ left: 2, top: 1 }))).toBe(true);
+  });
+
+  test('detects full containment in either direction', () => {
+    const outer = rect({ width: 10, height: 10 });
+    const inner = rect({ left: 3, top: 3, width: 1, height: 1 });
+    expect(doRectsIntersect(outer, inner)).toBe(true);
+    expect(doRectsIntersect(inner, outer)).toBe(true);
+  });
+
+  test('reports no overlap for rects that are entirely apart', () => {
+    expect(doRectsIntersect(rect(), rect({ left: 20, top: 20 }))).toBe(false);
+  });
+
+  test('treats touching edges as intersecting', () => {
+    expect(doRectsIntersect(rect(), rect({ left: 4, top: 0 }))).toBe(true);
+  });
+});
+
+describe('getBoxesIntersectingRect', () => {
+  test('returns every box whose projected rect overlaps the given rect', () => {
+    const inside = buildBox({ id: 'inside' });
+    const outside = buildBox({ id: 'outside', x: 100, z: 100 });
+    const marqueeRect: Rect2D = { left: -1, top: -1, width: 6, height: 5 };
+    const hits = getBoxesIntersectingRect(marqueeRect, [inside, outside], TOP_VIEW_AXES);
+    expect(hits.map(box => box.id)).toEqual(['inside']);
+  });
+
+  test('returns an empty array when nothing overlaps', () => {
+    const box = buildBox();
+    const marqueeRect: Rect2D = { left: 100, top: 100, width: 1, height: 1 };
+    expect(getBoxesIntersectingRect(marqueeRect, [box], TOP_VIEW_AXES)).toEqual([]);
   });
 });

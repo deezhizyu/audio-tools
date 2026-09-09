@@ -1,20 +1,25 @@
 import type { JSX } from 'preact';
-import type { RoomBox } from '../../audio/room/roomTypes';
+import { ROOM_MATERIALS } from '../../audio/room/roomMaterials';
+import type { RoomBox, RoomMaterialId } from '../../audio/room/roomTypes';
 import {
   activeRoomEditorTool,
   createBoxFromCanvasDrag,
   listenerPosition,
-  moveBox,
   moveListenerOnAxes,
+  moveSelectedBoxes,
   moveSourceOnAxes,
-  removeSelectedBox,
+  removeSelectedBoxes,
   resizeBox,
   roomBoxes,
-  selectBox,
-  selectedBoxId,
+  selectBoxesInRect,
+  selectedBoxIds,
+  selectSingleBox,
   setActiveRoomEditorTool,
   sourcePosition,
-  updateSelectedBoxAbsorption,
+  toggleBoxSelection,
+  updateSelectedBoxesAbsorptionBand,
+  updateSelectedBoxesMaterial,
+  updateSelectedBoxesTextureIntensity,
   updateSelectedBoxField,
 } from '../../state/roomReverbSignals';
 import { centimetersToMeters, metersToCentimeters } from '../../utils/unitConversion';
@@ -29,7 +34,7 @@ const SIDE_VIEW_AXES = { horizontal: 'z', vertical: 'y' } as const;
 
 const TOOL_OPTIONS: { tool: RoomEditorTool; label: string }[] = [
   { tool: 'select', label: 'Select / move' },
-  { tool: 'add-wall', label: 'Draw wall' },
+  { tool: 'add-object', label: 'Draw object' },
   { tool: 'add-absorber', label: 'Draw absorber' },
 ];
 
@@ -51,6 +56,26 @@ const ABSORPTION_BANDS: { band: 'low' | 'mid' | 'high'; label: string }[] = [
   { band: 'high', label: 'High' },
 ];
 
+/** Purely a picker-grouping split (optgroups), not a hard restriction — any material can still be applied to
+    either an object or an absorber box. */
+const HARD_SURFACE_MATERIAL_IDS = new Set<RoomMaterialId>([
+  'generic-object',
+  'concrete',
+  'painted-brick',
+  'bare-brick',
+  'linoleum',
+  'parquet',
+  'wood',
+  'plastic',
+  'smooth-metal',
+  'uneven-metal',
+  'glass',
+  'gypsum-board',
+  'grass',
+]);
+const HARD_SURFACE_MATERIALS = ROOM_MATERIALS.filter(material => HARD_SURFACE_MATERIAL_IDS.has(material.id));
+const SOFT_SURFACE_MATERIALS = ROOM_MATERIALS.filter(material => !HARD_SURFACE_MATERIAL_IDS.has(material.id));
+
 function NumberField({
   label,
   value,
@@ -59,7 +84,7 @@ function NumberField({
   onChange,
 }: {
   label: string;
-  value: number;
+  value: number | null;
   step: number;
   unit?: string;
   onChange: (value: number) => void;
@@ -73,7 +98,14 @@ function NumberField({
     <label class="flex flex-col gap-1 text-xs">
       <span class="text-text-tertiary">{label}</span>
       <div class="flex items-center gap-1.5 rounded-md border border-border-strong bg-surface-overlay px-2 py-1 focus-within:border-accent">
-        <input type="number" step={step} value={value} onInput={handleInput} class="w-full bg-transparent font-mono text-xs text-text-primary outline-none" />
+        <input
+          type="number"
+          step={step}
+          value={value ?? ''}
+          placeholder={value === null ? 'Mixed' : undefined}
+          onInput={handleInput}
+          class="w-full bg-transparent font-mono text-xs text-text-primary outline-none placeholder:text-text-tertiary"
+        />
         {unit && <span class="shrink-0 text-[10px] text-text-tertiary">{unit}</span>}
       </div>
     </label>
@@ -88,34 +120,98 @@ function DistanceField({ label, meters, onChangeMeters }: { label: string; meter
   );
 }
 
-function SelectedBoxInspector() {
-  const box = roomBoxes.value.find(candidate => candidate.id === selectedBoxId.value);
-  if (!box) {
-    return <p class="text-xs text-text-tertiary">Select a box to edit its exact position, size, and absorption.</p>;
-  }
+/** `value: null` renders as "Mixed" — used by the multi-select inspector when selected boxes' texture
+    intensity differs. */
+function RangeField({ label, value, hint, onChange }: { label: string; value: number | null; hint?: string; onChange: (value: number) => void }) {
+  const handleInput = (event: JSX.TargetedEvent<HTMLInputElement>) => {
+    onChange(Number(event.currentTarget.value));
+  };
 
+  return (
+    <label class="flex flex-col gap-1 text-xs">
+      <div class="flex items-center justify-between">
+        <span class="text-text-tertiary">{label}</span>
+        <span class="font-mono text-[10px] text-text-tertiary">{value === null ? 'Mixed' : value.toFixed(1)}</span>
+      </div>
+      <input type="range" min={0} max={2} step={0.1} value={value ?? 1} onInput={handleInput} class="w-full accent-accent" />
+      {hint && <span class="text-[10px] text-text-tertiary">{hint}</span>}
+    </label>
+  );
+}
+
+/** `value: null` (multi-select with mixed materials) shows a neutral placeholder rather than any one selected
+    box's material — there's no single "current" material meaningful across a mixed set. */
+function MaterialSelect({ value, onChange }: { value: RoomMaterialId | null; onChange: (materialId: RoomMaterialId) => void }) {
+  const handleChange = (event: JSX.TargetedEvent<HTMLSelectElement>) => {
+    onChange(event.currentTarget.value as RoomMaterialId);
+  };
+
+  return (
+    <label class="flex flex-col gap-1 text-xs">
+      <span class="text-text-tertiary">Material</span>
+      <select
+        value={value ?? ''}
+        onChange={handleChange}
+        class="w-full rounded-md border border-border-strong bg-surface-overlay px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent"
+      >
+        {value === null && (
+          <option value="" disabled>
+            Change material…
+          </option>
+        )}
+        <optgroup label="Hard surfaces">
+          {HARD_SURFACE_MATERIALS.map(material => (
+            <option key={material.id} value={material.id}>
+              {material.label}
+            </option>
+          ))}
+        </optgroup>
+        <optgroup label="Soft surfaces">
+          {SOFT_SURFACE_MATERIALS.map(material => (
+            <option key={material.id} value={material.id}>
+              {material.label}
+            </option>
+          ))}
+        </optgroup>
+      </select>
+    </label>
+  );
+}
+
+function SingleBoxInspector({ box }: { box: RoomBox }) {
   return (
     <div class="flex flex-col gap-4">
       <div class="flex items-center justify-between">
-        <span class="text-xs font-medium uppercase tracking-wide text-text-secondary">{box.kind === 'wall' ? 'Wall' : 'Absorber'}</span>
-        <Button variant="ghost" onClick={removeSelectedBox}>
+        <span class="text-xs font-medium uppercase tracking-wide text-text-secondary">{box.kind === 'object' ? 'Object' : 'Absorber'}</span>
+        <Button variant="ghost" onClick={removeSelectedBoxes}>
           Delete
         </Button>
       </div>
 
+      <MaterialSelect value={box.materialId} onChange={updateSelectedBoxesMaterial} />
+
+      {box.kind === 'object' && (
+        <RangeField
+          label="Texture / roughness"
+          value={box.textureIntensity}
+          hint="0 = smooth, 1 = realistic, 2 = extra rough — also changes how this surface scatters sound"
+          onChange={updateSelectedBoxesTextureIntensity}
+        />
+      )}
+
       <div class="grid grid-cols-3 gap-3">
         {POSITION_FIELDS.map(({ field, label }) => (
-          <DistanceField key={field} label={label} meters={box[field]} onChangeMeters={meters => updateSelectedBoxField(field, meters)} />
+          <DistanceField key={field} label={label} meters={box[field]} onChangeMeters={meters => updateSelectedBoxField(box.id, field, meters)} />
         ))}
       </div>
 
       <div class="grid grid-cols-3 gap-3">
         {SIZE_FIELDS.map(({ field, label }) => (
-          <DistanceField key={field} label={label} meters={box[field]} onChangeMeters={meters => updateSelectedBoxField(field, meters)} />
+          <DistanceField key={field} label={label} meters={box[field]} onChangeMeters={meters => updateSelectedBoxField(box.id, field, meters)} />
         ))}
       </div>
 
-      {box.kind === 'wall' && (
+      {box.kind === 'object' && (
         <div>
           <p class="mb-2 text-xs text-text-tertiary">Absorption (0 = fully reflective, 1 = fully absorbed)</p>
           <div class="grid grid-cols-3 gap-3">
@@ -125,7 +221,7 @@ function SelectedBoxInspector() {
                 label={label}
                 step={0.05}
                 value={box.absorption[band]}
-                onChange={value => updateSelectedBoxAbsorption({ ...box.absorption, [band]: Math.min(1, Math.max(0, value)) })}
+                onChange={value => updateSelectedBoxesAbsorptionBand(band, Math.min(1, Math.max(0, value)))}
               />
             ))}
           </div>
@@ -133,6 +229,56 @@ function SelectedBoxInspector() {
       )}
     </div>
   );
+}
+
+function mixedOrValue(values: number[]): number | null {
+  return values.every(value => value === values[0]) ? values[0] : null;
+}
+
+function MultiBoxInspector({ boxes }: { boxes: RoomBox[] }) {
+  return (
+    <div class="flex flex-col gap-4">
+      <div class="flex items-center justify-between">
+        <span class="text-xs font-medium uppercase tracking-wide text-text-secondary">{boxes.length} objects selected</span>
+        <Button variant="ghost" onClick={removeSelectedBoxes}>
+          Delete
+        </Button>
+      </div>
+
+      <MaterialSelect value={null} onChange={updateSelectedBoxesMaterial} />
+
+      <RangeField
+        label="Texture / roughness"
+        value={mixedOrValue(boxes.map(box => box.textureIntensity))}
+        hint="0 = smooth, 1 = realistic, 2 = extra rough — also changes how these surfaces scatter sound"
+        onChange={updateSelectedBoxesTextureIntensity}
+      />
+
+      <div>
+        <p class="mb-2 text-xs text-text-tertiary">Absorption (0 = fully reflective, 1 = fully absorbed)</p>
+        <div class="grid grid-cols-3 gap-3">
+          {ABSORPTION_BANDS.map(({ band, label }) => (
+            <NumberField
+              key={band}
+              label={label}
+              step={0.05}
+              value={mixedOrValue(boxes.map(box => box.absorption[band]))}
+              onChange={value => updateSelectedBoxesAbsorptionBand(band, Math.min(1, Math.max(0, value)))}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SelectedBoxInspector() {
+  const selected = roomBoxes.value.filter(box => selectedBoxIds.value.has(box.id));
+  if (selected.length === 0) {
+    return <p class="text-xs text-text-tertiary">Select a box to edit its exact position, size, and absorption.</p>;
+  }
+  if (selected.length === 1) return <SingleBoxInspector box={selected[0]} />;
+  return <MultiBoxInspector boxes={selected} />;
 }
 
 export function RoomEditor() {
@@ -146,7 +292,7 @@ export function RoomEditor() {
           title="Room"
           description={
             <>
-              Draw walls and absorbers, then place the <span class="text-accent">source</span> and{' '}
+              Draw objects and absorbers, then place the <span class="text-accent">source</span> and{' '}
               <span class="text-text-primary">listener</span> dots.
             </>
           }
@@ -167,12 +313,14 @@ export function RoomEditor() {
           verticalAxisLabel="Z"
           axes={TOP_VIEW_AXES}
           boxes={boxes}
-          selectedBoxId={selectedBoxId.value}
+          selectedBoxIds={selectedBoxIds.value}
           source={sourcePosition.value}
           listener={listenerPosition.value}
           activeTool={activeTool}
-          onSelectBox={selectBox}
-          onMoveBox={(boxId, deltaHorizontal, deltaVertical) => moveBox(boxId, TOP_VIEW_AXES, deltaHorizontal, deltaVertical)}
+          onSelectBox={selectSingleBox}
+          onToggleBoxSelection={toggleBoxSelection}
+          onMarqueeSelect={selectBoxesInRect}
+          onMoveSelectedBoxes={(deltaHorizontal, deltaVertical) => moveSelectedBoxes(TOP_VIEW_AXES, deltaHorizontal, deltaVertical)}
           onResizeBox={(boxId, handle, point) => resizeBox(boxId, TOP_VIEW_AXES, handle, point)}
           onCreateBox={(start, end) => createBoxFromCanvasDrag(TOP_VIEW_AXES, start, end)}
           onMoveSource={point => moveSourceOnAxes(TOP_VIEW_AXES, point)}
@@ -184,12 +332,14 @@ export function RoomEditor() {
           verticalAxisLabel="Y"
           axes={FRONT_VIEW_AXES}
           boxes={boxes}
-          selectedBoxId={selectedBoxId.value}
+          selectedBoxIds={selectedBoxIds.value}
           source={sourcePosition.value}
           listener={listenerPosition.value}
           activeTool={activeTool}
-          onSelectBox={selectBox}
-          onMoveBox={(boxId, deltaHorizontal, deltaVertical) => moveBox(boxId, FRONT_VIEW_AXES, deltaHorizontal, deltaVertical)}
+          onSelectBox={selectSingleBox}
+          onToggleBoxSelection={toggleBoxSelection}
+          onMarqueeSelect={selectBoxesInRect}
+          onMoveSelectedBoxes={(deltaHorizontal, deltaVertical) => moveSelectedBoxes(FRONT_VIEW_AXES, deltaHorizontal, deltaVertical)}
           onResizeBox={(boxId, handle, point) => resizeBox(boxId, FRONT_VIEW_AXES, handle, point)}
           onCreateBox={(start, end) => createBoxFromCanvasDrag(FRONT_VIEW_AXES, start, end)}
           onMoveSource={point => moveSourceOnAxes(FRONT_VIEW_AXES, point)}
@@ -201,12 +351,14 @@ export function RoomEditor() {
           verticalAxisLabel="Y"
           axes={SIDE_VIEW_AXES}
           boxes={boxes}
-          selectedBoxId={selectedBoxId.value}
+          selectedBoxIds={selectedBoxIds.value}
           source={sourcePosition.value}
           listener={listenerPosition.value}
           activeTool={activeTool}
-          onSelectBox={selectBox}
-          onMoveBox={(boxId, deltaHorizontal, deltaVertical) => moveBox(boxId, SIDE_VIEW_AXES, deltaHorizontal, deltaVertical)}
+          onSelectBox={selectSingleBox}
+          onToggleBoxSelection={toggleBoxSelection}
+          onMarqueeSelect={selectBoxesInRect}
+          onMoveSelectedBoxes={(deltaHorizontal, deltaVertical) => moveSelectedBoxes(SIDE_VIEW_AXES, deltaHorizontal, deltaVertical)}
           onResizeBox={(boxId, handle, point) => resizeBox(boxId, SIDE_VIEW_AXES, handle, point)}
           onCreateBox={(start, end) => createBoxFromCanvasDrag(SIDE_VIEW_AXES, start, end)}
           onMoveSource={point => moveSourceOnAxes(SIDE_VIEW_AXES, point)}
