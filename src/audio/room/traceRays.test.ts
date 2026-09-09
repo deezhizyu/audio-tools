@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { traceRays, type RayTracingParams } from './traceRays';
-import type { RoomBox, RoomScene } from './roomTypes';
+import type { RoomBox, RoomMaterialId, RoomScene } from './roomTypes';
 
 /** Always returns 0.5, so every `randomUnitVector` call in `traceRays.ts` resolves to the same direction
     (approximately -x) and every test run is fully deterministic. */
@@ -107,5 +107,53 @@ describe('traceRays', () => {
     expect(smoothResult).toHaveLength(1);
     expect(roughResult).toHaveLength(1);
     expect(roughResult[0].energy.low).not.toBeCloseTo(smoothResult[0].energy.low, 6);
+  });
+
+  test('a near-specular material aligned with the mirror-reflection direction delivers more energy than a rough one', () => {
+    // This geometry (source(5,0,0) -> hit(1,0,0) -> listener(8,0,0)) puts the listener exactly along the ray's
+    // mirror-reflection direction, isolating recordReflectionArrival's specular lobe. A near-specular material
+    // (smooth metal) should concentrate its reflected energy into that tight peak and so deliver more of it
+    // here than a rough, diffuse material (grass) spreading the same energy budget over a wide lobe instead —
+    // the opposite of what a diffuse-only NEE contribution (no specular term at all) would produce, where a
+    // near-specular material contributes almost nothing regardless of alignment.
+    const smoothObject = buildObjectBox({ materialId: 'smooth-metal' });
+    const roughObject = buildObjectBox({ materialId: 'grass' });
+    const buildScene = (box: RoomBox): RoomScene => ({ boxes: [box], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } });
+
+    const [smoothArrival] = traceRays(buildScene(smoothObject), buildParams());
+    const [roughArrival] = traceRays(buildScene(roughObject), buildParams());
+
+    expect(smoothArrival.energy.low).toBeGreaterThan(roughArrival.energy.low);
+  });
+
+  test('a rough material does not deliver unboundedly more total reflected energy than a smooth one for the same room', () => {
+    // Regression test for the "car cabin" energy-inflation bug: before recordReflectionArrival had a specular
+    // lobe, raising a material's scatterAmount scaled up its next-event-estimation contribution with nothing to
+    // balance it, so a rough material's total delivered energy (summed across many rays and bounces) could run
+    // many times a smooth material's for identical geometry — an unnaturally dense, front-loaded reflection
+    // burst. With complementary diffuse (scatterAmount) and specular (1 - scatterAmount) lobes, the total should
+    // stay within a modest factor of each other instead.
+    function seededRandom(seed: number): () => number {
+      let state = seed;
+      return () => {
+        state = (state * 1664525 + 1013904223) >>> 0;
+        return state / 4294967296;
+      };
+    }
+
+    const totalLowEnergy = (materialId: RoomMaterialId): number => {
+      const room = buildObjectBox({ materialId, x: -2.4, y: 0, z: -2.09, width: 4.8, height: 2.5, depth: 4.17 });
+      const scene: RoomScene = { boxes: [room], source: { x: -0.8, y: 1.2, z: 0 }, listener: { x: 0.5, y: 1.2, z: 0 } };
+      const params = buildParams({ numberOfRays: 300, maximumBounces: 20, randomSource: seededRandom(42) });
+      return traceRays(scene, params).reduce((sum, arrival) => sum + arrival.energy.low, 0);
+    };
+
+    const smoothTotal = totalLowEnergy('smooth-metal');
+    const roughTotal = totalLowEnergy('grass');
+
+    expect(smoothTotal).toBeGreaterThan(0);
+    expect(roughTotal).toBeGreaterThan(0);
+    expect(roughTotal / smoothTotal).toBeLessThan(3);
+    expect(smoothTotal / roughTotal).toBeLessThan(3);
   });
 });

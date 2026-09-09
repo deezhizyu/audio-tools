@@ -108,24 +108,36 @@ function hasLineOfSightToListener(from: Vector3, listener: Vector3, distance: nu
   });
 }
 
+/** How tightly a specular highlight is focused around the true mirror-reflection angle — the `kSpecularExponent`
+    Steam Audio's own reflection simulator uses for exactly this term. Higher = a narrower, brighter highlight
+    (closer to a perfect point-like mirror echo); this doesn't change with a box's roughness — `scatterAmount`
+    already controls how much of a hit's energy uses this lobe vs. the diffuse one (see `recordReflectionArrival`
+    below). */
+const SPECULAR_LOBE_EXPONENT = 100;
+
 /** Next-event estimation: rather than waiting for a stochastic ray to wander within some capture radius of
     the listener (which starves nearby listeners of samples and, worse, lets a ray's very first, pre-bounce
-    segment "capture" spurious energy when the listener happens to sit close to the source), every bounce
-    fires one deterministic shadow ray straight at the listener. If it's unobstructed, the bounce contributes
-    energy via a normalized Lambertian term: `scatterAmount / π` is the fraction of the bounce's energy that
-    a perfectly diffuse reflection would radiate per steradian (the `1/π` keeps the hemisphere integral of that
-    lobe energy-conserving rather than energy-inflating), scaled by `scatterAmount` because only the diffusely
-    -scattered share of a reflection plausibly reaches an arbitrary point in a single hop — the specular
-    remainder keeps traveling with the traced ray itself and can only reach the listener via a later bounce.
-    That's then weighted by the usual inverse-square falloff and the cosine of how directly the surface faces
-    the listener. This overall technique — deterministic shadow rays instead of hoping a ray wanders close
-    enough — is what real-time geometric-acoustics engines (e.g. Steam Audio) use to avoid exactly the "rays
-    miss the listener" failure mode; the Lambertian normalization is standard energy-conserving diffuse BRDF
-    math, without which every bounce (not just the rare lucky ones) massively over-contributes and the
-    reflection tail drowns out the direct sound. */
+    segment "capture" spurious energy when the listener happens to sit close to the source), every bounce fires
+    one deterministic shadow ray straight at the listener. If it's unobstructed, the bounce contributes energy
+    via a normalized Blinn-Phong-style BRDF: a Lambertian diffuse lobe (`scatterAmount / π`, weighted by the
+    cosine of how directly the surface faces the listener) plus a specular lobe peaked at the true mirror
+    -reflection angle (`(1 - scatterAmount)` weighted, via the half-vector between the incoming ray and the
+    shadow ray raised to `SPECULAR_LOBE_EXPONENT`) — the same combined-lobe formula Steam Audio's own reflection
+    simulator's `shade()` uses. Both lobes are individually energy-conserving (each integrates to at most 1 over
+    the hemisphere) and are complementary, weighted by `scatterAmount` and `1 - scatterAmount` respectively, so
+    raising a surface's roughness *redistributes* its reflected energy from a narrow specular highlight into a
+    wide diffuse spread rather than inflating the total delivered to the listener — an earlier diffuse-only
+    version of this function had no specular term at all, so a near-specular surface (low `scatterAmount`)
+    contributed almost nothing here, and a rough surface's contribution grew with `scatterAmount` alone with
+    nothing to balance it, letting a rough material's reflected energy grow unboundedly louder than a smooth
+    one's for the same geometry — audible as an unnaturally dense, front-loaded, quickly-decaying burst of early
+    reflections rather than a spacious reverb tail. This overall technique — deterministic shadow rays instead
+    of hoping a ray wanders close enough — is what real-time geometric-acoustics engines (e.g. Steam Audio) use
+    to avoid the "rays miss the listener" failure mode. */
 function recordReflectionArrival(
   hitPoint: Vector3,
   hitNormal: Vector3,
+  incomingDirection: Vector3,
   hitScatterAmount: number,
   distanceTraveledToHit: number,
   energyAtHit: FrequencyBandValues,
@@ -146,9 +158,18 @@ function recordReflectionArrival(
 
   if (!hasLineOfSightToListener(originPoint, listener, distanceToListener, boxes)) return;
 
+  const halfVector = normalizeVector({
+    x: directionToListener.x - incomingDirection.x,
+    y: directionToListener.y - incomingDirection.y,
+    z: directionToListener.z - incomingDirection.z,
+  });
+  const specularAlignment = Math.max(0, dotVectors(halfVector, hitNormal));
+
   const clampedDistance = Math.max(distanceToListener, params.minimumContributionDistanceMeters);
   const diffuseLobeWeight = (hitScatterAmount / Math.PI) * cosineWeight;
-  const attenuation = diffuseLobeWeight / (clampedDistance * clampedDistance);
+  const specularLobeWeight =
+    ((SPECULAR_LOBE_EXPONENT + 2) / (8 * Math.PI)) * (1 - hitScatterAmount) * Math.pow(specularAlignment, SPECULAR_LOBE_EXPONENT);
+  const attenuation = (diffuseLobeWeight + specularLobeWeight) / (clampedDistance * clampedDistance);
   const totalDistance = distanceTraveledToHit + distanceToListener;
 
   arrivals.push({
@@ -192,7 +213,7 @@ export function traceRays(scene: RoomScene, params: RayTracingParams): ImpulseAr
       };
 
       const hitScatterAmount = getEffectiveScatterAmount(hit.box);
-      recordReflectionArrival(hitPoint, hit.normal, hitScatterAmount, distanceTraveled, energyAfterAbsorption, scene.listener, boxes, params, arrivals);
+      recordReflectionArrival(hitPoint, hit.normal, direction, hitScatterAmount, distanceTraveled, energyAfterAbsorption, scene.listener, boxes, params, arrivals);
 
       if (maximumBandValue(energyAfterAbsorption) < params.minimumEnergyThreshold) break;
       energy = energyAfterAbsorption;
