@@ -15,8 +15,10 @@ import {
   selectedBoxIds,
   selectSingleBox,
   setActiveRoomEditorTool,
+  snapToAlignmentEnabled,
   sourcePosition,
   toggleBoxSelection,
+  toggleSnapToAlignment,
   updateSelectedBoxesAbsorptionBand,
   updateSelectedBoxesMaterial,
   updateSelectedBoxesTextureIntensity,
@@ -297,12 +299,16 @@ export function RoomEditor() {
             </>
           }
         />
-        <div class="flex flex-wrap gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           {TOOL_OPTIONS.map(({ tool, label }) => (
             <Button key={tool} variant={activeTool === tool ? 'primary' : 'secondary'} onClick={() => setActiveRoomEditorTool(tool)}>
               {label}
             </Button>
           ))}
+          <div class="mx-1 h-6 w-px bg-border-subtle" />
+          <Button variant={snapToAlignmentEnabled.value ? 'primary' : 'secondary'} onClick={toggleSnapToAlignment}>
+            Snap {snapToAlignmentEnabled.value ? 'on' : 'off'}
+          </Button>
         </div>
       </div>
 
@@ -317,6 +323,7 @@ export function RoomEditor() {
           source={sourcePosition.value}
           listener={listenerPosition.value}
           activeTool={activeTool}
+          snapEnabled={snapToAlignmentEnabled.value}
           onSelectBox={selectSingleBox}
           onToggleBoxSelection={toggleBoxSelection}
           onMarqueeSelect={selectBoxesInRect}
@@ -336,6 +343,7 @@ export function RoomEditor() {
           source={sourcePosition.value}
           listener={listenerPosition.value}
           activeTool={activeTool}
+          snapEnabled={snapToAlignmentEnabled.value}
           onSelectBox={selectSingleBox}
           onToggleBoxSelection={toggleBoxSelection}
           onMarqueeSelect={selectBoxesInRect}
@@ -355,6 +363,7 @@ export function RoomEditor() {
           source={sourcePosition.value}
           listener={listenerPosition.value}
           activeTool={activeTool}
+          snapEnabled={snapToAlignmentEnabled.value}
           onSelectBox={selectSingleBox}
           onToggleBoxSelection={toggleBoxSelection}
           onMarqueeSelect={selectBoxesInRect}

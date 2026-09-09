@@ -20,6 +20,7 @@ const MARKER_RADIUS_PIXELS = 6;
 
 export interface RoomViewTheme {
   gridColor: string;
+  axisColor: string;
   selectedOutlineColor: string;
   sourceColor: string;
   listenerColor: string;
@@ -30,6 +31,8 @@ export interface RoomViewDrawParams {
   heightPixels: number;
   boxes: RoomBox[];
   axes: OrthographicAxes;
+  horizontalAxisLabel: string;
+  verticalAxisLabel: string;
   selectedBoxIds: ReadonlySet<string>;
   source: RoomPoint3D;
   listener: RoomPoint3D;
@@ -127,17 +130,45 @@ function drawGrid(context: CanvasRenderingContext2D, widthPixels: number, height
     context.lineTo(widthPixels, pixelY);
   }
   context.stroke();
+}
 
-  // Origin axes drawn brighter than the rest of the grid so it reads as a fixed reference point across views.
-  const origin = worldToPixel({ horizontal: 0, vertical: 0 }, widthPixels, heightPixels, transform);
-  context.globalAlpha = 0.6;
+const AXIS_LINE_ALPHA = 0.55;
+const AXIS_LABEL_FONT = '11px system-ui, sans-serif';
+const AXIS_LABEL_PADDING_PIXELS = 6;
+
+/** The two reference axis lines (through world origin, where horizontal/vertical are both 0) that every view
+    draws — a fixed, always-visible frame the eye can judge position and alignment against, independent of
+    where any object happens to sit. Drawn with its own dedicated color/weight rather than folded into the grid
+    (as a merely-brighter grid line, which is what this used to be) so it reads as a deliberate reference axis
+    rather than an accident of the grid spacing, and labeled with which room axis (X/Y/Z) each line represents. */
+function drawAxes(context: CanvasRenderingContext2D, params: RoomViewDrawParams): void {
+  const origin = worldToPixel({ horizontal: 0, vertical: 0 }, params.widthPixels, params.heightPixels, params.transform);
+
+  context.globalAlpha = AXIS_LINE_ALPHA;
+  context.strokeStyle = params.theme.axisColor;
+  context.lineWidth = 1.5;
   context.beginPath();
   context.moveTo(origin.horizontal, 0);
-  context.lineTo(origin.horizontal, heightPixels);
+  context.lineTo(origin.horizontal, params.heightPixels);
   context.moveTo(0, origin.vertical);
-  context.lineTo(widthPixels, origin.vertical);
+  context.lineTo(params.widthPixels, origin.vertical);
   context.stroke();
   context.globalAlpha = 1;
+
+  context.fillStyle = params.theme.axisColor;
+  context.font = AXIS_LABEL_FONT;
+  context.textBaseline = 'top';
+  // Horizontal-axis label sits near the canvas's right edge, offset above/below the horizontal line depending
+  // on which half of the canvas that line currently falls in, so it never runs off the top or bottom edge.
+  const horizontalLabelWidth = context.measureText(params.horizontalAxisLabel).width;
+  const horizontalLabelX = Math.max(AXIS_LABEL_PADDING_PIXELS, params.widthPixels - horizontalLabelWidth - AXIS_LABEL_PADDING_PIXELS);
+  const horizontalLabelY = origin.vertical > params.heightPixels / 2 ? origin.vertical - 16 : origin.vertical + 4;
+  context.fillText(params.horizontalAxisLabel, horizontalLabelX, Math.min(Math.max(horizontalLabelY, AXIS_LABEL_PADDING_PIXELS), params.heightPixels - 16));
+
+  // Vertical-axis label sits near the canvas's top edge, offset left/right of the vertical line depending on
+  // which half of the canvas that line currently falls in, so it never runs off the left or right edge.
+  const verticalLabelX = origin.horizontal > params.widthPixels / 2 ? origin.horizontal - 16 : origin.horizontal + 4;
+  context.fillText(params.verticalAxisLabel, Math.min(Math.max(verticalLabelX, AXIS_LABEL_PADDING_PIXELS), params.widthPixels - 16), AXIS_LABEL_PADDING_PIXELS);
 }
 
 function rectCorners(rect: Rect2D): Point2D[] {
@@ -199,6 +230,7 @@ function drawMarker(context: CanvasRenderingContext2D, point: Point2D, color: st
 export function drawRoomOrthographicView(context: CanvasRenderingContext2D, params: RoomViewDrawParams): void {
   context.clearRect(0, 0, params.widthPixels, params.heightPixels);
   drawGrid(context, params.widthPixels, params.heightPixels, params.transform, params.theme.gridColor);
+  drawAxes(context, params);
 
   for (const box of params.boxes) {
     drawBox(context, box, params, params.selectedBoxIds.has(box.id));

@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import {
+  collectSnapCandidates,
+  computeBoxMoveSnapOffset,
+  findNearestBoxDistance,
   getBoxesIntersectingRect,
   getBoxRectOnAxes,
   hitTestAllBoxesAtPoint,
   hitTestResizeHandle,
   resizeBoxOnAxes,
+  snapPointToCandidates,
   type OrthographicAxes,
   type Point2D,
   type Rect2D,
@@ -37,6 +41,7 @@ interface RoomOrthographicViewProps {
   source: RoomPoint3D;
   listener: RoomPoint3D;
   activeTool: RoomEditorTool;
+  snapEnabled: boolean;
   onSelectBox: (boxId: string | null) => void;
   onToggleBoxSelection: (boxId: string) => void;
   onMarqueeSelect: (boxIds: string[]) => void;
@@ -59,6 +64,10 @@ const ZOOM_SENSITIVITY = 0.0015;
     press-and-drag on a box/marker turn into a real move. Also doubles as the "same spot" tolerance for
     click-through selection cycling below. */
 const CLICK_VS_DRAG_THRESHOLD_PIXELS = 4;
+/** How close (in pixels) a drag has to land to a candidate alignment position — an object edge/center or an
+    axis — before it snaps to it. Deliberately a bit larger than the click-vs-drag threshold: snapping is meant
+    to be easy to land on without fighting the cursor. */
+const SNAP_THRESHOLD_PIXELS = 8;
 
 type DragMode =
   | { kind: 'pan'; lastPixelPoint: Point2D }
@@ -72,7 +81,18 @@ type DragMode =
           narrow the selection to that one box, matching conventional design-tool behavior. `null` for a
           Shift+click-started drag, which already applied its own toggle and shouldn't also collapse. */
       clickedBoxId: string | null;
-      lastWorldPoint: Point2D;
+      /** The single box snapping is computed against — its hypothetical position (tracked independently of
+          any snap correction already applied, see `dragStartWorldPoint`/`anchorStartPosition` below) is what
+          gets tested against other boxes' edges; the resulting per-axis correction is then applied to every
+          selected box equally, so the whole group moves together without drifting apart. */
+      anchorBoxId: string;
+      /** The pointer's world position when this drag started, paired with `anchorStartPosition` (the anchor
+          box's position at that same moment) so each frame can recompute the anchor's *unsnapped* hypothetical
+          position directly from total cursor movement since drag start — rather than accumulating already-
+          snapped deltas frame over frame, which would let a snap correction permanently bias later frames
+          instead of releasing cleanly once the cursor moves back out of tolerance. */
+      dragStartWorldPoint: Point2D;
+      anchorStartPosition: Point2D;
       startPixelPoint: Point2D;
       hasCrossedClickThreshold: boolean;
     }
@@ -80,9 +100,12 @@ type DragMode =
   | { kind: 'create-box'; startWorldPoint: Point2D }
   | { kind: 'marquee'; startWorldPoint: Point2D };
 
-interface SizeLabel {
+interface FloatingLabel {
   pixelPoint: Point2D;
   text: string;
+  /** Resize/create-box labels float above the cursor (their existing, established position); the source/
+      listener distance-to-axes readout floats below the marker instead, per how it was asked for. */
+  placement: 'above' | 'below';
 }
 
 /** Tracks click-through selection cycling (see `resolveClickTarget` below): the screen point and hit stack the
@@ -99,6 +122,7 @@ function resolveThemeColors(referenceElement: Element): RoomViewTheme {
   const rootStyle = getComputedStyle(referenceElement);
   return {
     gridColor: rootStyle.getPropertyValue('--color-border-subtle').trim(),
+    axisColor: rootStyle.getPropertyValue('--color-accent').trim(),
     selectedOutlineColor: rootStyle.getPropertyValue('--color-accent').trim(),
     sourceColor: rootStyle.getPropertyValue('--color-accent').trim(),
     listenerColor: rootStyle.getPropertyValue('--color-text-primary').trim(),
@@ -109,14 +133,37 @@ function formatSizeLabel(horizontalMeters: number, verticalMeters: number): stri
   return `${Math.round(metersToCentimeters(horizontalMeters))} × ${Math.round(metersToCentimeters(verticalMeters))} cm`;
 }
 
-/** Keeps the floating size tooltip from hanging off either edge of the canvas — without `white-space: nowrap`
-    (set on the label itself) a `left` this close to an edge would also make the browser's shrink-to-fit width
+/** Shown below the source/listener marker while it's being dragged: how far it currently sits from each of
+    the two drawn axis lines, plus (when the room has any objects) the distance to the nearest one — the
+    numeric complement to the visual axis lines and grid, for placing a marker precisely without needing to
+    open its exact-position fields. */
+function formatDistanceLabel(
+  horizontalAxisLabel: string,
+  horizontalMeters: number,
+  verticalAxisLabel: string,
+  verticalMeters: number,
+  nearestObjectMeters: number | null,
+): string {
+  const axisPart = `${horizontalAxisLabel}${Math.round(metersToCentimeters(Math.abs(horizontalMeters)))} ${verticalAxisLabel}${Math.round(metersToCentimeters(Math.abs(verticalMeters)))}cm`;
+  if (nearestObjectMeters === null) return axisPart;
+  return `${axisPart} · obj ${Math.round(metersToCentimeters(nearestObjectMeters))}cm`;
+}
+
+/** Keeps a floating label from hanging off either edge of the canvas — without `white-space: nowrap` (set on
+    the label itself) a `left` this close to an edge would also make the browser's shrink-to-fit width
     calculation collapse toward zero and wrap every word onto its own line; this clamp is the belt to that
-    braces, keeping the label fully on-screen rather than merely unwrapped. */
-const SIZE_LABEL_HALF_WIDTH_ESTIMATE_PIXELS = 48;
-function clampSizeLabelHorizontal(pixelHorizontal: number, containerWidthPixels: number): number {
-  const maximumLeft = Math.max(SIZE_LABEL_HALF_WIDTH_ESTIMATE_PIXELS, containerWidthPixels - SIZE_LABEL_HALF_WIDTH_ESTIMATE_PIXELS);
-  return Math.min(Math.max(pixelHorizontal, SIZE_LABEL_HALF_WIDTH_ESTIMATE_PIXELS), maximumLeft);
+    braces, keeping the label fully on-screen rather than merely unwrapped. The half-width is estimated from
+    the label's own text (monospace, so character count is a reliable proxy for rendered width) rather than a
+    single fixed constant, since the distance-to-axes label can run noticeably longer than the size label. */
+const FLOATING_LABEL_MINIMUM_HALF_WIDTH_PIXELS = 32;
+const FLOATING_LABEL_CHARACTER_WIDTH_ESTIMATE_PIXELS = 5.6;
+const FLOATING_LABEL_HORIZONTAL_PADDING_PIXELS = 14;
+function estimateFloatingLabelHalfWidthPixels(text: string): number {
+  return Math.max(FLOATING_LABEL_MINIMUM_HALF_WIDTH_PIXELS, (text.length * FLOATING_LABEL_CHARACTER_WIDTH_ESTIMATE_PIXELS + FLOATING_LABEL_HORIZONTAL_PADDING_PIXELS) / 2);
+}
+function clampFloatingLabelHorizontal(pixelHorizontal: number, containerWidthPixels: number, halfWidthEstimatePixels: number): number {
+  const maximumLeft = Math.max(halfWidthEstimatePixels, containerWidthPixels - halfWidthEstimatePixels);
+  return Math.min(Math.max(pixelHorizontal, halfWidthEstimatePixels), maximumLeft);
 }
 
 const RESIZE_HANDLE_CURSORS: Record<ResizeHandle, string> = {
@@ -168,6 +215,7 @@ export function RoomOrthographicView({
   source,
   listener,
   activeTool,
+  snapEnabled,
   onSelectBox,
   onToggleBoxSelection,
   onMarqueeSelect,
@@ -185,7 +233,7 @@ export function RoomOrthographicView({
   const [transform, setTransform] = useState<ViewTransform>(DEFAULT_VIEW_TRANSFORM);
   const [previewRect, setPreviewRect] = useState<{ start: Point2D; end: Point2D } | null>(null);
   const [marqueeRect, setMarqueeRect] = useState<{ start: Point2D; end: Point2D } | null>(null);
-  const [sizeLabel, setSizeLabel] = useState<SizeLabel | null>(null);
+  const [floatingLabel, setFloatingLabel] = useState<FloatingLabel | null>(null);
   const [cursorStyle, setCursorStyle] = useState('default');
 
   const getTheme = (referenceElement: Element): RoomViewTheme => {
@@ -215,6 +263,8 @@ export function RoomOrthographicView({
         heightPixels: VIEW_HEIGHT_PIXELS,
         boxes,
         axes,
+        horizontalAxisLabel,
+        verticalAxisLabel,
         selectedBoxIds,
         source,
         listener,
@@ -295,11 +345,46 @@ export function RoomOrthographicView({
     return handle ? { box: selectedBox, handle } : null;
   };
 
+  const getSnapToleranceWorld = (): number => {
+    const widthPixels = containerRef.current?.clientWidth ?? 1;
+    return SNAP_THRESHOLD_PIXELS / pixelsPerMeter(widthPixels, transform.spanMeters);
+  };
+
+  /** Snaps a single dragged point (a resize handle, a create-box drag corner) to nearby object edges/centers
+      and the origin axes — `excludeBoxIds` leaves out the box being resized itself, if any. No-ops when
+      snapping is disabled or nothing is within tolerance. */
+  const snapDraggedPoint = (point: Point2D, excludeBoxIds: ReadonlySet<string>): Point2D => {
+    if (!snapEnabled) return point;
+    const candidates = collectSnapCandidates(boxes, axes, excludeBoxIds);
+    return snapPointToCandidates(point, candidates, getSnapToleranceWorld());
+  };
+
+  /** Snaps a marker (source/listener) drag to object edges/centers, the origin axes, and the *other*
+      marker's position (so the source and listener can snap to each other too). */
+  const snapMarkerPoint = (point: Point2D, otherMarkerPoint: Point2D): Point2D => {
+    if (!snapEnabled) return point;
+    const candidates = collectSnapCandidates(boxes, axes, new Set(), [otherMarkerPoint]);
+    return snapPointToCandidates(point, candidates, getSnapToleranceWorld());
+  };
+
   const handleWheel = (event: JSX.TargetedWheelEvent<HTMLCanvasElement>) => {
     event.preventDefault();
     const widthPixels = containerRef.current?.clientWidth ?? 1;
     const zoomFactor = Math.exp(event.deltaY * ZOOM_SENSITIVITY);
     setTransform(current => zoomViewTransform(current, zoomFactor, eventToPixelPoint(event), widthPixels, VIEW_HEIGHT_PIXELS));
+  };
+
+  const startMoveSelectedBoxesDrag = (anchorBox: RoomBox, clickedBoxId: string | null, worldPoint: Point2D, pixelPoint: Point2D): void => {
+    const anchorRect = getBoxRectOnAxes(anchorBox, axes);
+    dragModeRef.current = {
+      kind: 'move-selected-boxes',
+      clickedBoxId,
+      anchorBoxId: anchorBox.id,
+      dragStartWorldPoint: worldPoint,
+      anchorStartPosition: { horizontal: anchorRect.left, vertical: anchorRect.top },
+      startPixelPoint: pixelPoint,
+      hasCrossedClickThreshold: false,
+    };
   };
 
   const handlePointerDown = (event: JSX.TargetedPointerEvent<HTMLCanvasElement>) => {
@@ -346,7 +431,7 @@ export function RoomOrthographicView({
       const wasSelected = selectedBoxIds.has(topHit.id);
       onToggleBoxSelection(topHit.id);
       if (!wasSelected) {
-        dragModeRef.current = { kind: 'move-selected-boxes', clickedBoxId: null, lastWorldPoint: point, startPixelPoint: pixelPoint, hasCrossedClickThreshold: false };
+        startMoveSelectedBoxesDrag(topHit, null, point, pixelPoint);
       }
       return;
     }
@@ -365,7 +450,7 @@ export function RoomOrthographicView({
     // for now — dragging it should move the whole group. Only a box outside the current selection replaces it
     // immediately, so an unselected box highlights right away even before any drag starts.
     if (!selectedBoxIds.has(resolvedBox.id)) onSelectBox(resolvedBox.id);
-    dragModeRef.current = { kind: 'move-selected-boxes', clickedBoxId: resolvedBox.id, lastWorldPoint: point, startPixelPoint: pixelPoint, hasCrossedClickThreshold: false };
+    startMoveSelectedBoxesDrag(resolvedBox, resolvedBox.id, point, pixelPoint);
   };
 
   const updateHoverCursor = (point: Point2D) => {
@@ -407,8 +492,24 @@ export function RoomOrthographicView({
           if (distance < CLICK_VS_DRAG_THRESHOLD_PIXELS) return;
           dragModeRef.current = { ...dragMode, hasCrossedClickThreshold: true };
         }
-        if (dragMode.kind === 'move-source') onMoveSource(point);
-        else onMoveListener(point);
+        const otherMarker = dragMode.kind === 'move-source' ? listener : source;
+        const otherMarkerPoint = { horizontal: otherMarker[axes.horizontal], vertical: otherMarker[axes.vertical] };
+        const snappedPoint = snapMarkerPoint(point, otherMarkerPoint);
+        if (dragMode.kind === 'move-source') onMoveSource(snappedPoint);
+        else onMoveListener(snappedPoint);
+
+        const snappedPixelPoint = worldToPixel(snappedPoint, containerRef.current?.clientWidth ?? 1, VIEW_HEIGHT_PIXELS, transform);
+        setFloatingLabel({
+          pixelPoint: snappedPixelPoint,
+          placement: 'below',
+          text: formatDistanceLabel(
+            horizontalAxisLabel,
+            snappedPoint.horizontal,
+            verticalAxisLabel,
+            snappedPoint.vertical,
+            findNearestBoxDistance(snappedPoint, boxes, axes),
+          ),
+        });
         break;
       }
       case 'move-selected-boxes': {
@@ -417,23 +518,51 @@ export function RoomOrthographicView({
           if (distance < CLICK_VS_DRAG_THRESHOLD_PIXELS) return;
           dragModeRef.current = { ...dragMode, hasCrossedClickThreshold: true };
         }
-        onMoveSelectedBoxes(point.horizontal - dragMode.lastWorldPoint.horizontal, point.vertical - dragMode.lastWorldPoint.vertical);
-        dragModeRef.current = { ...dragMode, lastWorldPoint: point, hasCrossedClickThreshold: true };
+
+        const anchorBox = boxes.find(box => box.id === dragMode.anchorBoxId);
+        if (!anchorBox) break;
+        const currentAnchorRect = getBoxRectOnAxes(anchorBox, axes);
+
+        // Recomputed from total cursor movement since the drag started (not from the anchor's current,
+        // possibly already-snapped position) — see the `dragStartWorldPoint`/`anchorStartPosition` doc comment
+        // on `DragMode` for why: this is what lets a snap correction release cleanly once the cursor moves
+        // back out of tolerance, instead of permanently biasing every later frame.
+        const virtualAnchorPosition = {
+          horizontal: dragMode.anchorStartPosition.horizontal + (point.horizontal - dragMode.dragStartWorldPoint.horizontal),
+          vertical: dragMode.anchorStartPosition.vertical + (point.vertical - dragMode.dragStartWorldPoint.vertical),
+        };
+        const hypotheticalAnchorRect: Rect2D = { left: virtualAnchorPosition.horizontal, top: virtualAnchorPosition.vertical, width: currentAnchorRect.width, height: currentAnchorRect.height };
+
+        let snapOffset: Point2D = { horizontal: 0, vertical: 0 };
+        if (snapEnabled) {
+          const candidates = collectSnapCandidates(boxes, axes, selectedBoxIds);
+          snapOffset = computeBoxMoveSnapOffset(hypotheticalAnchorRect, candidates, getSnapToleranceWorld());
+        }
+
+        const snappedAnchorPosition = { horizontal: virtualAnchorPosition.horizontal + snapOffset.horizontal, vertical: virtualAnchorPosition.vertical + snapOffset.vertical };
+        onMoveSelectedBoxes(snappedAnchorPosition.horizontal - currentAnchorRect.left, snappedAnchorPosition.vertical - currentAnchorRect.top);
         break;
       }
       case 'resize-box': {
         const currentBox = boxes.find(box => box.id === dragMode.boxId);
+        const snappedPoint = snapDraggedPoint(point, new Set([dragMode.boxId]));
         if (currentBox) {
-          const previewBoxRect = getBoxRectOnAxes(resizeBoxOnAxes(currentBox, axes, dragMode.handle, point), axes);
-          setSizeLabel({ pixelPoint, text: formatSizeLabel(previewBoxRect.width, previewBoxRect.height) });
+          const previewBoxRect = getBoxRectOnAxes(resizeBoxOnAxes(currentBox, axes, dragMode.handle, snappedPoint), axes);
+          setFloatingLabel({ pixelPoint, placement: 'above', text: formatSizeLabel(previewBoxRect.width, previewBoxRect.height) });
         }
-        onResizeBox(dragMode.boxId, dragMode.handle, point);
+        onResizeBox(dragMode.boxId, dragMode.handle, snappedPoint);
         break;
       }
-      case 'create-box':
-        setPreviewRect({ start: dragMode.startWorldPoint, end: point });
-        setSizeLabel({ pixelPoint, text: formatSizeLabel(Math.abs(point.horizontal - dragMode.startWorldPoint.horizontal), Math.abs(point.vertical - dragMode.startWorldPoint.vertical)) });
+      case 'create-box': {
+        const snappedPoint = snapDraggedPoint(point, new Set());
+        setPreviewRect({ start: dragMode.startWorldPoint, end: snappedPoint });
+        setFloatingLabel({
+          pixelPoint,
+          placement: 'above',
+          text: formatSizeLabel(Math.abs(snappedPoint.horizontal - dragMode.startWorldPoint.horizontal), Math.abs(snappedPoint.vertical - dragMode.startWorldPoint.vertical)),
+        });
         break;
+      }
       case 'marquee':
         setMarqueeRect({ start: dragMode.startWorldPoint, end: point });
         break;
@@ -443,7 +572,7 @@ export function RoomOrthographicView({
   const handlePointerUp = (event: JSX.TargetedPointerEvent<HTMLCanvasElement>) => {
     const dragMode = dragModeRef.current;
     if (dragMode?.kind === 'create-box') {
-      const point = pixelToWorldHere(eventToPixelPoint(event));
+      const point = snapDraggedPoint(pixelToWorldHere(eventToPixelPoint(event)), new Set());
       onCreateBox(dragMode.startWorldPoint, point);
       setPreviewRect(null);
     }
@@ -461,7 +590,7 @@ export function RoomOrthographicView({
       onSelectBox(dragMode.clickedBoxId);
     }
     dragModeRef.current = null;
-    setSizeLabel(null);
+    setFloatingLabel(null);
     event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
@@ -482,12 +611,20 @@ export function RoomOrthographicView({
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
         />
-        {sizeLabel && (
+        {floatingLabel && (
           <div
-            class="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full whitespace-nowrap rounded border border-border-strong bg-surface-overlay px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-text-primary"
-            style={{ left: `${clampSizeLabelHorizontal(sizeLabel.pixelPoint.horizontal, containerRef.current?.clientWidth ?? 0)}px`, top: `${Math.max(20, sizeLabel.pixelPoint.vertical - 10)}px` }}
+            class={`pointer-events-none absolute z-10 -translate-x-1/2 whitespace-nowrap rounded border border-border-strong bg-surface-overlay px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-text-primary ${
+              floatingLabel.placement === 'above' ? '-translate-y-full' : ''
+            }`}
+            style={{
+              left: `${clampFloatingLabelHorizontal(floatingLabel.pixelPoint.horizontal, containerRef.current?.clientWidth ?? 0, estimateFloatingLabelHalfWidthPixels(floatingLabel.text))}px`,
+              top:
+                floatingLabel.placement === 'above'
+                  ? `${Math.max(20, floatingLabel.pixelPoint.vertical - 10)}px`
+                  : `${Math.min(VIEW_HEIGHT_PIXELS - 16, floatingLabel.pixelPoint.vertical + MARKER_HIT_RADIUS_PIXELS)}px`,
+            }}
           >
-            {sizeLabel.text}
+            {floatingLabel.text}
           </div>
         )}
       </div>

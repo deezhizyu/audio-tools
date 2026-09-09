@@ -1,13 +1,18 @@
 import { describe, expect, test } from 'vitest';
 import {
+  collectSnapCandidates,
+  computeBoxMoveSnapOffset,
   createBoxFromDrag,
+  distanceFromPointToRect,
   doRectsIntersect,
+  findNearestBoxDistance,
   getBoxesIntersectingRect,
   hitTestAllBoxesAtPoint,
   hitTestBox,
   hitTestResizeHandle,
   moveBoxOnAxes,
   resizeBoxOnAxes,
+  snapPointToCandidates,
   type OrthographicAxes,
   type Rect2D,
 } from './roomEditorGeometry';
@@ -181,5 +186,101 @@ describe('getBoxesIntersectingRect', () => {
     const box = buildBox();
     const marqueeRect: Rect2D = { left: 100, top: 100, width: 1, height: 1 };
     expect(getBoxesIntersectingRect(marqueeRect, [box], TOP_VIEW_AXES)).toEqual([]);
+  });
+});
+
+describe('collectSnapCandidates', () => {
+  test('always includes the origin (0) on both axes, even with no boxes', () => {
+    const candidates = collectSnapCandidates([], TOP_VIEW_AXES, new Set());
+    expect(candidates.horizontal).toContain(0);
+    expect(candidates.vertical).toContain(0);
+  });
+
+  test("includes every box's left/right/center edges and top/bottom/center edges", () => {
+    const box = buildBox({ id: 'a', x: 2, z: 5, width: 4, depth: 3 });
+    const candidates = collectSnapCandidates([box], TOP_VIEW_AXES, new Set());
+    expect(candidates.horizontal).toEqual(expect.arrayContaining([2, 6, 4]));
+    expect(candidates.vertical).toEqual(expect.arrayContaining([5, 8, 6.5]));
+  });
+
+  test('excludes boxes whose id is in excludeBoxIds', () => {
+    const box = buildBox({ id: 'excluded', x: 9, z: 9 });
+    const candidates = collectSnapCandidates([box], TOP_VIEW_AXES, new Set(['excluded']));
+    expect(candidates.horizontal).not.toContain(9);
+    expect(candidates.vertical).not.toContain(9);
+  });
+
+  test('includes extra caller-supplied points', () => {
+    const candidates = collectSnapCandidates([], TOP_VIEW_AXES, new Set(), [{ horizontal: 1.5, vertical: -2.5 }]);
+    expect(candidates.horizontal).toContain(1.5);
+    expect(candidates.vertical).toContain(-2.5);
+  });
+});
+
+describe('snapPointToCandidates', () => {
+  test('snaps each axis independently to the nearest candidate within tolerance', () => {
+    const candidates = { horizontal: [0, 5], vertical: [0, 3] };
+    const snapped = snapPointToCandidates({ horizontal: 0.2, vertical: 2.9 }, candidates, 0.5);
+    expect(snapped).toEqual({ horizontal: 0, vertical: 3 });
+  });
+
+  test('leaves a point unchanged when nothing is within tolerance', () => {
+    const candidates = { horizontal: [0], vertical: [0] };
+    const point = { horizontal: 10, vertical: 10 };
+    expect(snapPointToCandidates(point, candidates, 0.5)).toEqual(point);
+  });
+});
+
+describe('computeBoxMoveSnapOffset', () => {
+  const candidates = { horizontal: [0, 10], vertical: [0, 10] };
+
+  test('snaps the closest matching edge, not just the top-left corner', () => {
+    // Right edge (rect.left + rect.width = 9.8) is within tolerance of the candidate at 10; left edge (5.8)
+    // and center (7.8) are not.
+    const rect: Rect2D = { left: 5.8, top: 0, width: 4, height: 1 };
+    const offset = computeBoxMoveSnapOffset(rect, candidates, 0.5);
+    expect(offset.horizontal).toBeCloseTo(0.2);
+  });
+
+  test('returns {0, 0} when nothing is within tolerance on either axis', () => {
+    const rect: Rect2D = { left: 50, top: 50, width: 4, height: 1 };
+    expect(computeBoxMoveSnapOffset(rect, candidates, 0.5)).toEqual({ horizontal: 0, vertical: 0 });
+  });
+
+  test('resolves horizontal and vertical independently', () => {
+    // Left edge (0.1) is near the horizontal candidate at 0; nothing on the vertical axis is close.
+    const rect: Rect2D = { left: 0.1, top: 50, width: 4, height: 1 };
+    const offset = computeBoxMoveSnapOffset(rect, candidates, 0.5);
+    expect(offset.horizontal).toBeCloseTo(-0.1);
+    expect(offset.vertical).toBe(0);
+  });
+});
+
+describe('distanceFromPointToRect', () => {
+  const rect: Rect2D = { left: 0, top: 0, width: 4, height: 3 };
+
+  test('is 0 for a point inside the rect', () => {
+    expect(distanceFromPointToRect({ horizontal: 2, vertical: 1 }, rect)).toBe(0);
+  });
+
+  test('is the straight-line distance to the nearest edge for a point outside the rect', () => {
+    expect(distanceFromPointToRect({ horizontal: 7, vertical: 0 }, rect)).toBeCloseTo(3);
+  });
+
+  test('is the distance to the nearest corner when the point is diagonally outside', () => {
+    expect(distanceFromPointToRect({ horizontal: 7, vertical: 7 }, rect)).toBeCloseTo(Math.hypot(3, 4));
+  });
+});
+
+describe('findNearestBoxDistance', () => {
+  test('returns null when there are no boxes', () => {
+    expect(findNearestBoxDistance({ horizontal: 0, vertical: 0 }, [], TOP_VIEW_AXES)).toBeNull();
+  });
+
+  test('returns the distance to the closest of several boxes', () => {
+    const near = buildBox({ id: 'near', x: 10, z: 0, width: 1, depth: 1 });
+    const far = buildBox({ id: 'far', x: 100, z: 0, width: 1, depth: 1 });
+    const distance = findNearestBoxDistance({ horizontal: 8, vertical: 0 }, [near, far], TOP_VIEW_AXES);
+    expect(distance).toBeCloseTo(2);
   });
 });

@@ -34,6 +34,10 @@ export const sourcePosition = signal<RoomPoint3D>({ x: -2, y: 1.5, z: 0 });
 export const listenerPosition = signal<RoomPoint3D>({ x: 2, y: 1.5, z: 0 });
 export const selectedBoxIds = signal<ReadonlySet<string>>(new Set());
 export const activeRoomEditorTool = signal<RoomEditorTool>('select');
+/** Whether dragging a box/source/listener snaps to nearby object edges, their centers, and the origin axes
+    (see `computeBoxMoveSnapOffset`/`snapPointToCandidates` in `roomEditorGeometry.ts`). Purely an editor
+    convenience — it never affects the drawn room's saved geometry beyond where a drag happens to land. */
+export const snapToAlignmentEnabled = signal(true);
 
 // --- Audio signals — independent of the drawn room, so loading/replacing a file never touches the signals
 //     above. -----------------------------------------------------------------------------------------------
@@ -221,6 +225,10 @@ export function selectBoxesInRect(boxIds: string[]): void {
 
 export function setActiveRoomEditorTool(tool: RoomEditorTool): void {
   activeRoomEditorTool.value = tool;
+}
+
+export function toggleSnapToAlignment(): void {
+  snapToAlignmentEnabled.value = !snapToAlignmentEnabled.value;
 }
 
 export function updateSelectedBoxesAbsorptionBand(band: 'low' | 'mid' | 'high', value: number): void {
