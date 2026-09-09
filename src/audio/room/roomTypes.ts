@@ -49,12 +49,11 @@ export interface RoomBox {
       appearance/roughness in the editor (see `textureIntensity`). */
   materialId: RoomMaterialId;
   /** 0–2 multiplier over the chosen material's baseline roughness (`RoomMaterial.scatterAmount`), default 1.
-      This is not cosmetic: it scales how diffusely this box's surface scatters reflected sound in the ray
-      tracer (see `getEffectiveScatterAmount` in `roomMaterials.ts`), and that same effective value also
-      drives how strongly its bump texture renders on screen — so a box's look and its acoustic behavior can
-      never drift apart. Persists across material changes rather than resetting, so a user's dialed-in
-      roughness for a specific box survives picking a different material. Only meaningful for `kind: 'object'`
-      (an absorber's ray terminates on hit, before any scattering direction would be computed). */
+      A purely acoustic property: it scales how diffusely this box's surface scatters reflected sound in the
+      ray tracer (see `getEffectiveScatterAmount` in `roomMaterials.ts`) and has no visual effect. Persists
+      across material changes rather than resetting, so a user's dialed-in roughness for a specific box
+      survives picking a different material. Only meaningful for `kind: 'object'` (an absorber's ray
+      terminates on hit, before any scattering direction would be computed). */
   textureIntensity: number;
 }
 

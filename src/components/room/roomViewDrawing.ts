@@ -1,7 +1,6 @@
 import { getRoomMaterial } from '../../audio/room/roomMaterials';
 import type { RoomBox, RoomPoint3D } from '../../audio/room/roomTypes';
 import { getBoxRectOnAxes, type OrthographicAxes, type Point2D, type Rect2D } from '../../audio/room/roomEditorGeometry';
-import { drawMaterialTexture } from './roomViewTextures';
 
 /** How many world meters are visible across the canvas width, and which world point sits at the canvas's
     center — together these define one view's pan/zoom state. Kept per-view (not global), since panning the
@@ -205,10 +204,6 @@ function drawBox(context: CanvasRenderingContext2D, box: RoomBox, params: RoomVi
   context.fillStyle = fillColor;
   context.fillRect(topLeft.horizontal, topLeft.vertical, pixelWidth, pixelHeight);
   context.globalAlpha = 1;
-
-  drawMaterialTexture(context, box, rect, { left: topLeft.horizontal, top: topLeft.vertical, width: pixelWidth, height: pixelHeight }, point =>
-    worldToPixel(point, params.widthPixels, params.heightPixels, params.transform),
-  );
 
   context.strokeStyle = isSelected ? params.theme.selectedOutlineColor : fillColor;
   context.lineWidth = isSelected ? 2.5 : 1.5;

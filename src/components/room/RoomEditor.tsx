@@ -194,9 +194,9 @@ function SingleBoxInspector({ box }: { box: RoomBox }) {
 
       {box.kind === 'object' && (
         <RangeField
-          label="Texture / roughness"
+          label="Roughness"
           value={box.textureIntensity}
-          hint="0 = smooth, 1 = realistic, 2 = extra rough — also changes how this surface scatters sound"
+          hint="0 = smooth (mirror-like), 1 = realistic, 2 = extra rough — how diffusely this surface scatters sound"
           onChange={updateSelectedBoxesTextureIntensity}
         />
       )}
@@ -250,9 +250,9 @@ function MultiBoxInspector({ boxes }: { boxes: RoomBox[] }) {
       <MaterialSelect value={null} onChange={updateSelectedBoxesMaterial} />
 
       <RangeField
-        label="Texture / roughness"
+        label="Roughness"
         value={mixedOrValue(boxes.map(box => box.textureIntensity))}
-        hint="0 = smooth, 1 = realistic, 2 = extra rough — also changes how these surfaces scatter sound"
+        hint="0 = smooth (mirror-like), 1 = realistic, 2 = extra rough — how diffusely these surfaces scatter sound"
         onChange={updateSelectedBoxesTextureIntensity}
       />
 
