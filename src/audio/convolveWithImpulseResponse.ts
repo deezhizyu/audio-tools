@@ -15,13 +15,17 @@ export interface ConvolutionResult {
 export async function convolveWithImpulseResponse(
   dryChannelData: Float32Array<ArrayBuffer>[],
   drySampleRate: number,
-  impulseResponseChannelData: Float32Array<ArrayBuffer>,
+  impulseResponseChannelData: Float32Array<ArrayBuffer>[],
 ): Promise<ConvolutionResult> {
   const dryBuffer = buildAudioBufferFromChannels(dryChannelData, drySampleRate);
-  const impulseResponseBuffer = buildAudioBufferFromChannels([impulseResponseChannelData], drySampleRate);
+  const impulseResponseBuffer = buildAudioBufferFromChannels(impulseResponseChannelData, drySampleRate);
 
   const renderedLengthFrames = dryBuffer.length + impulseResponseBuffer.length;
-  const offlineContext = new OfflineAudioContext(dryBuffer.numberOfChannels, renderedLengthFrames, drySampleRate);
+  // At least as many channels as the (now stereo, decorrelated) impulse response — otherwise a mono dry file
+  // would down-mix the ConvolverNode's true-stereo output back to mono right at the destination, silently
+  // discarding the reflections' left/right decorrelation for exactly the files most likely to need it.
+  const numberOfChannels = Math.max(dryBuffer.numberOfChannels, impulseResponseBuffer.numberOfChannels);
+  const offlineContext = new OfflineAudioContext(numberOfChannels, renderedLengthFrames, drySampleRate);
 
   const sourceNode = offlineContext.createBufferSource();
   sourceNode.buffer = dryBuffer;

@@ -5,7 +5,6 @@ import { decodeAudioFile } from '../audio/decodeAudioFile';
 import { deriveReverbExportFileName } from '../audio/deriveReverbExportFileName';
 import { encodeMp3 } from '../audio/encodeMp3';
 import { encodeWav } from '../audio/encodeWav';
-import { DEFAULT_ABSORBER_ABSORPTION, DEFAULT_WALL_ABSORPTION } from '../audio/room/roomAcousticsDefaults';
 import {
   createBoxFromDrag,
   moveBoxOnAxes,
@@ -15,7 +14,8 @@ import {
   type ResizeHandle,
 } from '../audio/room/roomEditorGeometry';
 import { parseRoomScene, serializeRoomScene } from '../audio/room/roomFileFormat';
-import type { RoomBox, RoomBoxKind, RoomPoint3D, RoomScene } from '../audio/room/roomTypes';
+import { DEFAULT_ABSORBER_MATERIAL_ID, DEFAULT_OBJECT_MATERIAL_ID, getRoomMaterial } from '../audio/room/roomMaterials';
+import type { RoomBox, RoomBoxKind, RoomMaterialId, RoomPoint3D, RoomScene } from '../audio/room/roomTypes';
 import { SimpleAudioPlaybackController } from '../audio/SimpleAudioPlaybackController';
 import type { ExportAudioFormat } from '../audio/types';
 import { RoomAcousticsWorkerClient } from '../audio/worker/RoomAcousticsWorkerClient';
@@ -32,8 +32,12 @@ const RESIMULATE_DEBOUNCE_MILLISECONDS = 250;
 export const roomBoxes = signal<RoomBox[]>([]);
 export const sourcePosition = signal<RoomPoint3D>({ x: -2, y: 1.5, z: 0 });
 export const listenerPosition = signal<RoomPoint3D>({ x: 2, y: 1.5, z: 0 });
-export const selectedBoxId = signal<string | null>(null);
+export const selectedBoxIds = signal<ReadonlySet<string>>(new Set());
 export const activeRoomEditorTool = signal<RoomEditorTool>('select');
+/** Whether dragging a box/source/listener snaps to nearby object edges, their centers, and the origin axes
+    (see `computeBoxMoveSnapOffset`/`snapPointToCandidates` in `roomEditorGeometry.ts`). Purely an editor
+    convenience — it never affects the drawn room's saved geometry beyond where a drag happens to land. */
+export const snapToAlignmentEnabled = signal(true);
 
 // --- Audio signals — independent of the drawn room, so loading/replacing a file never touches the signals
 //     above. -----------------------------------------------------------------------------------------------
@@ -164,49 +168,91 @@ function updateBoxes(updater: (boxes: RoomBox[]) => RoomBox[]): void {
   scheduleResimulate();
 }
 
+/** Backs every batch mutation below (material, absorption band, texture intensity) — applies `updater` to
+    every currently-selected box and leaves the rest untouched. Works identically whether one box or many are
+    selected, so there's no separate single-vs-batch code path for these operations. */
+function updateSelectedBoxes(updater: (box: RoomBox) => RoomBox): void {
+  if (selectedBoxIds.value.size === 0) return;
+  updateBoxes(boxes => boxes.map(box => (selectedBoxIds.value.has(box.id) ? updater(box) : box)));
+}
+
 export function createBoxFromCanvasDrag(axes: OrthographicAxes, startPoint: Point2D, endPoint: Point2D): void {
-  const kind: RoomBoxKind = activeRoomEditorTool.value === 'add-absorber' ? 'absorber' : 'wall';
-  const absorption = kind === 'wall' ? DEFAULT_WALL_ABSORPTION : DEFAULT_ABSORBER_ABSORPTION;
-  const newBox = createBoxFromDrag(crypto.randomUUID(), kind, absorption, startPoint, endPoint, axes);
+  const kind: RoomBoxKind = activeRoomEditorTool.value === 'add-absorber' ? 'absorber' : 'object';
+  const materialId = kind === 'object' ? DEFAULT_OBJECT_MATERIAL_ID : DEFAULT_ABSORBER_MATERIAL_ID;
+  const absorption = getRoomMaterial(materialId).absorption;
+  const newBox = createBoxFromDrag(crypto.randomUUID(), kind, materialId, absorption, startPoint, endPoint, axes);
 
   updateBoxes(boxes => [...boxes, newBox]);
-  selectedBoxId.value = newBox.id;
+  selectedBoxIds.value = new Set([newBox.id]);
   activeRoomEditorTool.value = 'select';
 }
 
-export function moveBox(boxId: string, axes: OrthographicAxes, deltaHorizontal: number, deltaVertical: number): void {
-  updateBoxes(boxes => boxes.map(box => (box.id === boxId ? moveBoxOnAxes(box, axes, deltaHorizontal, deltaVertical) : box)));
+export function moveSelectedBoxes(axes: OrthographicAxes, deltaHorizontal: number, deltaVertical: number): void {
+  updateSelectedBoxes(box => moveBoxOnAxes(box, axes, deltaHorizontal, deltaVertical));
 }
 
 export function resizeBox(boxId: string, axes: OrthographicAxes, handle: ResizeHandle, point: Point2D): void {
   updateBoxes(boxes => boxes.map(box => (box.id === boxId ? resizeBoxOnAxes(box, axes, handle, point) : box)));
 }
 
-export function removeSelectedBox(): void {
-  const id = selectedBoxId.value;
-  if (!id) return;
-  updateBoxes(boxes => boxes.filter(box => box.id !== id));
-  selectedBoxId.value = null;
+export function removeSelectedBoxes(): void {
+  const ids = selectedBoxIds.value;
+  if (ids.size === 0) return;
+  updateBoxes(boxes => boxes.filter(box => !ids.has(box.id)));
+  selectedBoxIds.value = new Set();
 }
 
-export function selectBox(boxId: string | null): void {
-  selectedBoxId.value = boxId;
+/** Replaces the whole selection with a single box (or clears it) — a plain click, or a plain click resolved
+    via the click-through cycling algorithm in `RoomOrthographicView.tsx`. */
+export function selectSingleBox(boxId: string | null): void {
+  selectedBoxIds.value = boxId ? new Set([boxId]) : new Set();
+}
+
+/** Adds or removes one box from the selection without touching the rest — a Shift+click. */
+export function toggleBoxSelection(boxId: string): void {
+  const current = selectedBoxIds.value;
+  const next = new Set(current);
+  if (next.has(boxId)) next.delete(boxId);
+  else next.add(boxId);
+  selectedBoxIds.value = next;
+}
+
+/** Replaces the whole selection with the given ids — a marquee/rubber-band drag release. Always a
+    replacement, not additive; there's no modifier for an additive marquee yet. */
+export function selectBoxesInRect(boxIds: string[]): void {
+  selectedBoxIds.value = new Set(boxIds);
 }
 
 export function setActiveRoomEditorTool(tool: RoomEditorTool): void {
   activeRoomEditorTool.value = tool;
 }
 
-export function updateSelectedBoxAbsorption(absorption: RoomBox['absorption']): void {
-  const id = selectedBoxId.value;
-  if (!id) return;
-  updateBoxes(boxes => boxes.map(box => (box.id === id ? { ...box, absorption } : box)));
+export function toggleSnapToAlignment(): void {
+  snapToAlignmentEnabled.value = !snapToAlignmentEnabled.value;
 }
 
-export function updateSelectedBoxField(field: 'x' | 'y' | 'z' | 'width' | 'height' | 'depth', value: number): void {
-  const id = selectedBoxId.value;
-  if (!id) return;
-  updateBoxes(boxes => boxes.map(box => (box.id === id ? { ...box, [field]: value } : box)));
+export function updateSelectedBoxesAbsorptionBand(band: 'low' | 'mid' | 'high', value: number): void {
+  updateSelectedBoxes(box => ({ ...box, absorption: { ...box.absorption, [band]: value } }));
+}
+
+const MINIMUM_TEXTURE_INTENSITY = 0;
+const MAXIMUM_TEXTURE_INTENSITY = 2;
+
+/** Sets `materialId` and prefills `absorption` from that material's baseline values on every selected box —
+    the material picker's "editable starting point" behavior. Deliberately leaves `textureIntensity` alone, so
+    a user's dialed-in roughness for a box survives switching its material. */
+export function updateSelectedBoxesMaterial(materialId: RoomMaterialId): void {
+  const material = getRoomMaterial(materialId);
+  updateSelectedBoxes(box => ({ ...box, materialId, absorption: material.absorption }));
+}
+
+export function updateSelectedBoxesTextureIntensity(value: number): void {
+  const clamped = Math.min(MAXIMUM_TEXTURE_INTENSITY, Math.max(MINIMUM_TEXTURE_INTENSITY, value));
+  updateSelectedBoxes(box => ({ ...box, textureIntensity: clamped }));
+}
+
+export function updateSelectedBoxField(boxId: string, field: 'x' | 'y' | 'z' | 'width' | 'height' | 'depth', value: number): void {
+  updateBoxes(boxes => boxes.map(box => (box.id === boxId ? { ...box, [field]: value } : box)));
 }
 
 export function moveSourceOnAxes(axes: OrthographicAxes, point: Point2D): void {
@@ -260,7 +306,7 @@ export async function importRoomFromFile(file: File): Promise<void> {
     roomBoxes.value = scene.boxes;
     sourcePosition.value = scene.source;
     listenerPosition.value = scene.listener;
-    selectedBoxId.value = null;
+    selectedBoxIds.value = new Set();
     reverbErrorMessage.value = null;
     scheduleResimulate();
   } catch (caughtError) {

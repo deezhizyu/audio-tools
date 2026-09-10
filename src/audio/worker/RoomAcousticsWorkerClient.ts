@@ -2,7 +2,7 @@ import type { RoomScene } from '../room/roomTypes';
 import type { RoomAcousticsWorkerRequest, RoomAcousticsWorkerResponse } from './roomAcousticsWorkerMessages';
 
 export interface SimulateRoomResult {
-  impulseResponseChannelData: Float32Array<ArrayBuffer>;
+  impulseResponseChannelData: Float32Array<ArrayBuffer>[];
   sampleRate: number;
 }
 

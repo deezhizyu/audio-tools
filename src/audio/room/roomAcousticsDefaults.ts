@@ -15,16 +15,6 @@ export const MINIMUM_ENERGY_THRESHOLD = 1e-4;
 export const HISTOGRAM_BIN_DURATION_SECONDS = 0.005;
 export const MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS = 3;
 
-/** Reflections arriving before this many seconds after the source starts are kept as individually-timed
-    discrete impulses (see `stampDiscreteReflectionImpulses.ts`) rather than being folded into the statistical,
-    noise-based late-reverb tail (`synthesizeImpulseResponseFromHistogram.ts`). Early reflections are few enough
-    and loud enough to be heard as distinct echoes that define a room's size and shape; smearing them into noise
-    from the very first bin is what made reflections sound washy/distant even once their overall energy was
-    correctly balanced against the direct sound. 80ms sits within the usual range (50-100ms) after which
-    reflection density gets high enough for individual echoes to stop being perceptible on their own — the same
-    "mixing time" split real geometric-acoustics engines (including Steam Audio's hybrid reverb) use. */
-export const EARLY_REFLECTION_TRANSITION_TIME_SECONDS = 0.08;
-
 /** A ray's distance budget is derived directly from how much of the impulse response we're actually filling —
     not an arbitrary flat number. A fixed distance cap (this used to be a flat 200m) silently favors small
     rooms: a bounce in a small room only costs a couple of meters, so many bounces fit under any reasonable
@@ -41,16 +31,27 @@ export const MINIMUM_CONTRIBUTION_DISTANCE_METERS = 0.25;
 
 /** Fraction of each bounce's reflection that scatters into a random direction instead of reflecting purely
     specularly — real surfaces are never perfect mirrors, and a little diffusion avoids an unnaturally metallic-
-    sounding tail built from too-regular specular paths. */
-export const SCATTER_AMOUNT = 0.15;
+    sounding tail built from too-regular specular paths. This used to be the one scatter amount every surface
+    in a room shared; scattering is now per-box, driven by the chosen `RoomMaterial`'s own `scatterAmount` times
+    the box's `textureIntensity` (see `getEffectiveScatterAmount` in `roomMaterials.ts`). This constant lives on
+    only as the `generic-object`/`generic-absorber` catalog entries' baseline value, so a freshly-drawn box
+    (which starts on one of those generic materials) reproduces exactly the room-wide behavior this constant
+    used to define directly. Calibrated against Steam Audio's own shipped material library, which keeps this
+    same parameter at a flat ~0.05 for every one of its built-in materials (see `roomMaterials.ts`) rather than
+    using it as a strong per-material differentiator — a much higher value here measurably over-delivers
+    reflected energy through `recordReflectionArrival`'s diffuse BRDF lobe in `traceRays.ts`. */
+export const SCATTER_AMOUNT = 0.06;
 
-/** 0.1/0.1/0.15 (bare concrete/tile) made a freshly-drawn room, before anyone touches the per-wall absorption
-    sliders, extremely live: for a modest room and a source/listener a couple of meters apart, measurement
-    against this simulator showed the reverberant tail carrying roughly 15-17x the direct sound's total energy
-    at that absorption — matching the classical room-acoustics "critical distance" formula for a room that
+/** 0.1/0.1/0.15 (bare concrete/tile) made a freshly-drawn room, before anyone touches the per-object absorption
+    sliders, extremely live — matching the classical room-acoustics "critical distance" formula for a room that
     reflective, not a bug in the simulation. Raised to a "lightly furnished room" ballpark (carpet, some soft
-    furnishings) where the same test geometry lands closer to 5x, so the out-of-the-box result reads as "a room
-    with reverb" rather than "an empty tiled hallway." Existing walls keep whatever absorption they were drawn
-    with — this only changes what new walls start at. */
-export const DEFAULT_WALL_ABSORPTION: FrequencyBandValues = { low: 0.25, mid: 0.25, high: 0.3 };
+    furnishings) instead, so the out-of-the-box result reads as "a room with reverb" rather than "an empty tiled
+    hallway." (An earlier version of this comment cited specific measured reverberant/direct energy ratios for
+    these two absorption values; those numbers were measured against the old, much higher `SCATTER_AMOUNT`
+    and no longer describe this simulator's behavior now that scattering is calibrated against Steam Audio's
+    own shipped materials — see `roomMaterials.ts` — so they've been removed rather than left stale.) Existing
+    objects keep whatever absorption they were drawn with — this only changes what new objects start at. Also
+    lives on only as the `generic-object`/`generic-absorber` catalog entries' baseline absorption, for the same
+    reason as `SCATTER_AMOUNT` above. */
+export const DEFAULT_OBJECT_ABSORPTION: FrequencyBandValues = { low: 0.25, mid: 0.25, high: 0.3 };
 export const DEFAULT_ABSORBER_ABSORPTION: FrequencyBandValues = { low: 0.9, mid: 0.95, high: 0.98 };

@@ -16,7 +16,7 @@ self.onmessage = (event: MessageEvent<RoomAcousticsWorkerRequest>) => {
 
         respond(
           { type: 'simulate', requestId: request.requestId, impulseResponseChannelData, sampleRate: request.sampleRate },
-          [impulseResponseChannelData.buffer],
+          impulseResponseChannelData.map(channel => channel.buffer),
         );
         break;
       }
