@@ -1,4 +1,5 @@
 import { signal } from '@preact/signals';
+import { blendImpulseResponses } from '../audio/blendImpulseResponses';
 import { buildAudioBufferFromChannels } from '../audio/buildAudioBufferFromChannels';
 import { convolveWithImpulseResponse } from '../audio/convolveWithImpulseResponse';
 import { decodeAudioFile } from '../audio/decodeAudioFile';
@@ -72,6 +73,12 @@ let drySampleRate = 0;
     as it's ready (see `startLivePlaybackFromLatestSimulation`); exporting instead feeds it to
     `convolveWithImpulseResponse.ts` to render the complete dry file offline, once, at export time. */
 let latestImpulseResponseChannelData: Float32Array<ArrayBuffer>[] = [];
+/** What's actually fed to the live playback graph — `latestImpulseResponseChannelData` blended with whatever
+    this was before (see `blendImpulseResponses.ts`), so the audible reverb character evolves smoothly across
+    simulations instead of snapping to each one's own independent noise. Kept separate from
+    `latestImpulseResponseChannelData` so exporting always renders against the true, unblended latest
+    simulation rather than this smoothed live-preview approximation. */
+let liveImpulseResponseChannelData: Float32Array<ArrayBuffer>[] = [];
 let activePlaybackController: SimpleAudioPlaybackController | null = null;
 let activeWorkerClient: RoomAcousticsWorkerClient | null = null;
 let resimulateTimeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -152,7 +159,10 @@ function startLivePlaybackFromLatestSimulation(): void {
   const wasPlaying = isPlaybackPlaying.value;
   const resumeFromSeconds = playbackCurrentTimeSeconds.value;
   const dryAudioBuffer = buildAudioBufferFromChannels(dryChannelData, drySampleRate);
-  const impulseResponseAudioBuffer = buildAudioBufferFromChannels(latestImpulseResponseChannelData, drySampleRate);
+  // Blended with whatever was live before, not the raw latest simulation directly — see
+  // `liveImpulseResponseChannelData`'s comment.
+  liveImpulseResponseChannelData = blendImpulseResponses(liveImpulseResponseChannelData, latestImpulseResponseChannelData);
+  const impulseResponseAudioBuffer = buildAudioBufferFromChannels(liveImpulseResponseChannelData, drySampleRate);
 
   if (activePlaybackController) {
     activePlaybackController.setBuffers(dryAudioBuffer, impulseResponseAudioBuffer);
@@ -242,6 +252,9 @@ export async function loadDryAudioFile(file: File): Promise<void> {
   isPlaybackPlaying.value = false;
   playbackCurrentTimeSeconds.value = 0;
   playbackDurationSeconds.value = 0;
+  // Otherwise a new file that happens to share the previous one's sample rate would start out blending its
+  // very first simulation with a leftover impulse response from a completely different dry file/room session.
+  liveImpulseResponseChannelData = [];
 
   try {
     const decoded = await decodeAudioFile(file);
