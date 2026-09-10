@@ -95,11 +95,11 @@ describe('traceRays', () => {
     // Same geometry, only the hit object's material differs. The shadow-ray contribution's diffuse lobe
     // weight is directly proportional to the hit surface's effective scatter amount (see
     // `getEffectiveScatterAmount`/`recordReflectionArrival`), so a near-specular material (smooth metal,
-    // scatterAmount 0.05) and a highly diffuse one (concrete, scatterAmount 0.7) must produce measurably
-    // different arrival energy for the same bounce — confirming scattering is now read per-hit-box rather
-    // than from one fixed global constant.
+    // scatterAmount 0.05) and a diffuse one (grass, scatterAmount 0.3) must produce measurably different
+    // arrival energy for the same bounce — confirming scattering is now read per-hit-box rather than from one
+    // fixed global constant.
     const smoothObject = buildObjectBox({ materialId: 'smooth-metal' });
-    const roughObject = buildObjectBox({ materialId: 'concrete' });
+    const roughObject = buildObjectBox({ materialId: 'grass' });
 
     const smoothResult = traceRays({ boxes: [smoothObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } }, buildParams());
     const roughResult = traceRays({ boxes: [roughObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } }, buildParams());
@@ -124,6 +124,36 @@ describe('traceRays', () => {
     const [roughArrival] = traceRays(buildScene(roughObject), buildParams());
 
     expect(smoothArrival.energy.low).toBeGreaterThan(roughArrival.energy.low);
+  });
+
+  test("bounceOrder tags each arrival with how many prior bounces it followed — 0 on the first hit, incrementing after that", () => {
+    // Same enclosing-room fixture as above, but with room to bounce twice: with the fixed random source the
+    // ray travels essentially exactly along -x (see the comment on FIXED_RANDOM_SOURCE), so it hits the inner
+    // surface at x=-10 first, reflects to essentially exactly +x, then hits the opposite inner surface at
+    // x=10 — two distinct bounces, both with a clear shadow-ray path to the listener at x=8.
+    const enclosingRoom = buildObjectBox({ x: -10, y: -10, z: -10, width: 20, height: 20, depth: 20 });
+    const scene: RoomScene = { boxes: [enclosingRoom], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const arrivals = traceRays(scene, buildParams({ maximumBounces: 2 }));
+
+    expect(arrivals).toHaveLength(2);
+    expect(arrivals[0].bounceOrder).toBe(0);
+    expect(arrivals[1].bounceOrder).toBe(1);
+  });
+
+  test('air absorption rolls off high-frequency energy over distance faster than low-frequency energy', () => {
+    // Same absorption/scatter/geometry shape, just moved much farther away — comparing the high/low energy
+    // *ratio* (rather than either band in isolation) cancels out the geometric 1/distance² and material
+    // absorption terms, which apply identically to every band, isolating air absorption's frequency-dependent
+    // effect (see `airAbsorption.ts`).
+    const nearScene: RoomScene = { boxes: [buildObjectBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const farScene: RoomScene = { boxes: [buildObjectBox({ x: -50, width: 2 })], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+
+    const [nearArrival] = traceRays(nearScene, buildParams());
+    const [farArrival] = traceRays(farScene, buildParams());
+
+    const nearHighToLowRatio = nearArrival.energy.high / nearArrival.energy.low;
+    const farHighToLowRatio = farArrival.energy.high / farArrival.energy.low;
+    expect(farHighToLowRatio).toBeLessThan(nearHighToLowRatio);
   });
 
   test('a rough material does not deliver unboundedly more total reflected energy than a smooth one for the same room', () => {

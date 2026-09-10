@@ -4,10 +4,12 @@ import type { ImpulseArrival } from './traceRays';
 
 describe('buildEnergyHistogram', () => {
   test('sums arrivals into the correct time bin per band and normalizes by ray count', () => {
+    // bounceOrder is irrelevant to this function — that split happens upstream, in
+    // synthesizeRoomImpulseResponse.ts — so it's set to an arbitrary value here.
     const arrivals: ImpulseArrival[] = [
-      { timeSeconds: 0.001, energy: { low: 1, mid: 2, high: 3 } },
-      { timeSeconds: 0.004, energy: { low: 1, mid: 1, high: 1 } }, // same 5ms bin as the arrival above
-      { timeSeconds: 0.006, energy: { low: 4, mid: 0, high: 0 } }, // next bin
+      { timeSeconds: 0.001, energy: { low: 1, mid: 2, high: 3 }, bounceOrder: 1 },
+      { timeSeconds: 0.004, energy: { low: 1, mid: 1, high: 1 }, bounceOrder: 1 }, // same 5ms bin as the arrival above
+      { timeSeconds: 0.006, energy: { low: 4, mid: 0, high: 0 }, bounceOrder: 1 }, // next bin
     ];
 
     const histogram = buildEnergyHistogram(arrivals, 2, 0.005, 0.02);
@@ -19,7 +21,7 @@ describe('buildEnergyHistogram', () => {
   });
 
   test('drops arrivals outside the requested total duration', () => {
-    const arrivals: ImpulseArrival[] = [{ timeSeconds: 5, energy: { low: 1, mid: 1, high: 1 } }];
+    const arrivals: ImpulseArrival[] = [{ timeSeconds: 5, energy: { low: 1, mid: 1, high: 1 }, bounceOrder: 1 }];
     const histogram = buildEnergyHistogram(arrivals, 1, 0.005, 0.02);
     expect(Array.from(histogram.low).every(value => value === 0)).toBe(true);
   });

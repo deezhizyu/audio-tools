@@ -1,3 +1,4 @@
+import { applyAirAbsorption } from './airAbsorption';
 import { intersectRayWithBox, type AxisAlignedBox, type Ray } from './rayBoxIntersection';
 import { getEffectiveScatterAmount } from './roomMaterials';
 import { toAxisAlignedBox } from './roomBoxGeometry';
@@ -46,6 +47,14 @@ export const DEFAULT_RAY_TRACING_PARAMS: RayTracingParams = {
 export interface ImpulseArrival {
   timeSeconds: number;
   energy: FrequencyBandValues;
+  /** 0 for a ray's first bounce off any surface, incrementing per bounce after that. A first-bounce arrival
+      is one of at most `numberOfRays` samples of a single reflecting surface as seen directly from the
+      source — inherently few and tightly clustered in time for simple geometry (e.g. one flat floor).
+      Later-order arrivals proliferate combinatorially across a scene's surfaces and genuinely approximate a
+      dense, statistically independent field. `synthesizeRoomImpulseResponse.ts` uses this distinction to
+      route first-bounce arrivals to a coherent, discrete-tap renderer and everything else to the existing
+      noise-based one — see `renderDiscreteReflectionTaps.ts`. */
+  bounceOrder: number;
 }
 
 /** A small offset nudging a point off the surface it sits on, so the next intersection test doesn't
@@ -141,6 +150,7 @@ function recordReflectionArrival(
   hitScatterAmount: number,
   distanceTraveledToHit: number,
   energyAtHit: FrequencyBandValues,
+  bounceOrder: number,
   listener: Vector3,
   boxes: BoxWithBounds[],
   params: RayTracingParams,
@@ -174,7 +184,8 @@ function recordReflectionArrival(
 
   arrivals.push({
     timeSeconds: totalDistance / params.speedOfSoundMetersPerSecond,
-    energy: scaleBandValues(energyAtHit, attenuation),
+    energy: applyAirAbsorption(scaleBandValues(energyAtHit, attenuation), totalDistance),
+    bounceOrder,
   });
 }
 
@@ -213,27 +224,19 @@ export function traceRays(scene: RoomScene, params: RayTracingParams): ImpulseAr
       };
 
       const hitScatterAmount = getEffectiveScatterAmount(hit.box);
-      recordReflectionArrival(hitPoint, hit.normal, direction, hitScatterAmount, distanceTraveled, energyAfterAbsorption, scene.listener, boxes, params, arrivals);
+      recordReflectionArrival(hitPoint, hit.normal, direction, hitScatterAmount, distanceTraveled, energyAfterAbsorption, bounce, scene.listener, boxes, params, arrivals);
 
       if (maximumBandValue(energyAfterAbsorption) < params.minimumEnergyThreshold) break;
       energy = energyAfterAbsorption;
 
-      const specularDirection = reflectVector(direction, hit.normal);
-      const scatterDirection = randomHemisphereVector(hit.normal, params.randomSource);
-      direction = normalizeMixedDirection(specularDirection, scatterDirection, hitScatterAmount);
+      // A stochastic pick between a pure diffuse (hemisphere) direction and the pure specular reflection —
+      // never a blend of both — matching Steam Audio's own `bounce()`. Averaging the two directions into one
+      // vector (an earlier version of this function) isn't a sample of any real BRDF lobe; this is.
+      direction =
+        params.randomSource() < hitScatterAmount ? randomHemisphereVector(hit.normal, params.randomSource) : reflectVector(direction, hit.normal);
       position = addVectors(hitPoint, scaleVector(hit.normal, SURFACE_OFFSET_METERS));
     }
   }
 
   return arrivals;
-}
-
-function normalizeMixedDirection(specular: Vector3, scattered: Vector3, scatterAmount: number): Vector3 {
-  const mixed = {
-    x: specular.x * (1 - scatterAmount) + scattered.x * scatterAmount,
-    y: specular.y * (1 - scatterAmount) + scattered.y * scatterAmount,
-    z: specular.z * (1 - scatterAmount) + scattered.z * scatterAmount,
-  };
-  const length = Math.sqrt(mixed.x * mixed.x + mixed.y * mixed.y + mixed.z * mixed.z);
-  return length < 1e-9 ? specular : scaleVector(mixed, 1 / length);
 }
