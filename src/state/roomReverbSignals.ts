@@ -63,8 +63,11 @@ export const isExportingAudio = signal(false);
 
 let dryChannelData: Float32Array<ArrayBuffer>[] = [];
 let drySampleRate = 0;
-let wetChannelData: Float32Array<ArrayBuffer>[] = [];
-let wetSampleRate = 0;
+/** The latest simulated room's impulse response — always at `drySampleRate` (the room-acoustics worker
+    synthesizes it at whatever rate it's asked for). Live preview plays it through a `ConvolverNode` as soon
+    as it's ready (see `startLivePlaybackFromLatestSimulation`); exporting instead feeds it to
+    `convolveWithImpulseResponse.ts` to render the complete dry file offline, once, at export time. */
+let latestImpulseResponseChannelData: Float32Array<ArrayBuffer>[] = [];
 let activePlaybackController: SimpleAudioPlaybackController | null = null;
 let activeWorkerClient: RoomAcousticsWorkerClient | null = null;
 let resimulateTimeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -80,23 +83,39 @@ function scheduleResimulate(): void {
   if (resimulateTimeoutId !== null) clearTimeout(resimulateTimeoutId);
   resimulateTimeoutId = setTimeout(() => {
     resimulateTimeoutId = null;
-    void runSimulationAndConvolve();
+    void runSimulation();
   }, RESIMULATE_DEBOUNCE_MILLISECONDS);
+}
+
+/** If an edit's debounced resimulation hasn't fired yet, runs it immediately and waits for it — so an export
+    started right after an edit renders that edit's room, not whatever impulse response happened to be latest
+    when Download was clicked. Doesn't wait for an already-in-flight simulation (ray tracing is fast enough,
+    and bounded by `MAXIMUM_BOUNCES`/`NUMBER_OF_RAYS`, that this window is negligible), only a pending one. */
+async function flushPendingResimulate(): Promise<void> {
+  if (resimulateTimeoutId === null) return;
+  clearTimeout(resimulateTimeoutId);
+  resimulateTimeoutId = null;
+  await runSimulation();
 }
 
 /** Reuses the same controller (and its `AudioContext`) across every resimulation instead of tearing one down
     and spinning up a new one — recreating a real-time `AudioContext` on every room edit was the main source of
     the "very laggy editing" feel, since setting up an actual audio output stream is comparatively expensive
-    and was happening on every debounced edit rather than only when it was actually needed. */
-function startPlaybackFromWetAudio(): void {
+    and was happening on every debounced edit rather than only when it was actually needed.
+    Plays the dry audio through a live `ConvolverNode` fed the just-simulated impulse response, rather than
+    waiting for `convolveWithImpulseResponse.ts` to render the whole file offline first — listening can start
+    (or keep going, through a room edit) the instant ray tracing finishes, however long the dry file is. The
+    full offline render is reserved for `exportReverbAudio`, where exact rendered samples are actually needed. */
+function startLivePlaybackFromLatestSimulation(): void {
   const wasPlaying = isPlaybackPlaying.value;
   const resumeFromSeconds = playbackCurrentTimeSeconds.value;
-  const audioBuffer = buildAudioBufferFromChannels(wetChannelData, wetSampleRate);
+  const dryAudioBuffer = buildAudioBufferFromChannels(dryChannelData, drySampleRate);
+  const impulseResponseAudioBuffer = buildAudioBufferFromChannels(latestImpulseResponseChannelData, drySampleRate);
 
   if (activePlaybackController) {
-    activePlaybackController.setBuffer(audioBuffer);
+    activePlaybackController.setBuffers(dryAudioBuffer, impulseResponseAudioBuffer);
   } else {
-    const controller = new SimpleAudioPlaybackController(audioBuffer);
+    const controller = new SimpleAudioPlaybackController(dryAudioBuffer, impulseResponseAudioBuffer);
     controller.onTimeUpdate = seconds => {
       playbackCurrentTimeSeconds.value = seconds;
     };
@@ -105,14 +124,14 @@ function startPlaybackFromWetAudio(): void {
     };
     activePlaybackController = controller;
   }
-  playbackDurationSeconds.value = audioBuffer.duration;
+  playbackDurationSeconds.value = activePlaybackController.durationSeconds;
 
   // Mirrors PreviewPlaybackController's behavior on a config change: if the user was already listening, an
   // edit updates what they hear in place rather than silently stopping playback.
-  if (wasPlaying) activePlaybackController.play(Math.min(resumeFromSeconds, audioBuffer.duration));
+  if (wasPlaying) activePlaybackController.play(Math.min(resumeFromSeconds, activePlaybackController.durationSeconds));
 }
 
-async function runSimulationAndConvolve(): Promise<void> {
+async function runSimulation(): Promise<void> {
   if (dryChannelData.length === 0 || drySampleRate === 0) return;
 
   const requestToken = ++resimulateRequestToken;
@@ -124,12 +143,8 @@ async function runSimulationAndConvolve(): Promise<void> {
     const { impulseResponseChannelData } = await activeWorkerClient.simulate(currentScene(), drySampleRate, stereoSimulationEnabled.value);
     if (requestToken !== resimulateRequestToken) return;
 
-    const { channelData, sampleRate } = await convolveWithImpulseResponse(dryChannelData, drySampleRate, impulseResponseChannelData);
-    if (requestToken !== resimulateRequestToken) return;
-
-    wetChannelData = channelData;
-    wetSampleRate = sampleRate;
-    startPlaybackFromWetAudio();
+    latestImpulseResponseChannelData = impulseResponseChannelData;
+    startLivePlaybackFromLatestSimulation();
     hasCompletedSimulation.value = true;
   } catch (caughtError) {
     if (requestToken === resimulateRequestToken) {
@@ -147,7 +162,7 @@ export async function loadDryAudioFile(file: File): Promise<void> {
   isSimulatingReverb.value = true;
   hasCompletedSimulation.value = false;
   // Paused (not disposed) — the controller and its AudioContext are reused for whatever the new file's
-  // simulation produces, via `startPlaybackFromWetAudio`'s `setBuffer`.
+  // simulation produces, via `startLivePlaybackFromLatestSimulation`'s `setBuffers`.
   activePlaybackController?.pause();
   isPlaybackPlaying.value = false;
   playbackCurrentTimeSeconds.value = 0;
@@ -158,7 +173,7 @@ export async function loadDryAudioFile(file: File): Promise<void> {
     dryChannelData = decoded.channelData;
     drySampleRate = decoded.sampleRate;
     uploadedAudioFileName.value = file.name;
-    await runSimulationAndConvolve();
+    await runSimulation();
   } catch (caughtError) {
     reverbErrorMessage.value = caughtError instanceof Error ? caughtError.message : 'Could not read this audio file.';
     uploadedAudioFileName.value = null;
@@ -293,14 +308,22 @@ export function setExportFormat(format: ExportAudioFormat): void {
   exportFormat.value = format;
 }
 
+/** Renders the complete dry file against the current room's impulse response via `convolveWithImpulseResponse.ts`'s
+    `OfflineAudioContext` — full length, full precision — rather than reusing whatever live preview happens to
+    have played through its `ConvolverNode` so far. Live preview only ever plays; it never produces an actual
+    rendered sample buffer, so this is the one place that does. */
 export async function exportReverbAudio(): Promise<void> {
   const fileName = uploadedAudioFileName.value;
-  if (!fileName || wetChannelData.length === 0) return;
+  if (!fileName || dryChannelData.length === 0) return;
 
   isExportingAudio.value = true;
   reverbErrorMessage.value = null;
   try {
-    const blob = exportFormat.value === 'mp3' ? await encodeMp3(wetChannelData, wetSampleRate) : encodeWav(wetChannelData, wetSampleRate);
+    await flushPendingResimulate();
+    if (latestImpulseResponseChannelData.length === 0) return;
+
+    const { channelData, sampleRate } = await convolveWithImpulseResponse(dryChannelData, drySampleRate, latestImpulseResponseChannelData);
+    const blob = exportFormat.value === 'mp3' ? await encodeMp3(channelData, sampleRate) : encodeWav(channelData, sampleRate);
     downloadBlob(blob, deriveReverbExportFileName(fileName, exportFormat.value));
   } catch (caughtError) {
     reverbErrorMessage.value = caughtError instanceof Error ? caughtError.message : 'Could not export this audio file.';
