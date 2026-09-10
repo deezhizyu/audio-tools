@@ -1,20 +1,6 @@
+import { createOnePoleLowpassFilter, HIGH_BAND_CUTOFF_HERTZ, LOW_BAND_CUTOFF_HERTZ } from './bandSplitFilters';
 import type { EnergyHistogram } from './buildEnergyHistogram';
 import type { DirectSoundPath } from './directSound';
-
-// Matches Steam Audio's own 3-band split (low: up to 800Hz, mid: 800Hz-8kHz, high: above 8kHz) — the same
-// convention the published absorption tables backing `roomMaterials.ts` are measured/labeled against, so a
-// material's low/mid/high coefficients get applied to the frequency ranges they actually describe.
-const LOW_BAND_CUTOFF_HERTZ = 800;
-const HIGH_BAND_CUTOFF_HERTZ = 8000;
-
-function createOnePoleLowpassFilter(cutoffHertz: number, sampleRate: number): (input: number) => number {
-  const smoothingFactor = 1 - Math.exp((-2 * Math.PI * cutoffHertz) / sampleRate);
-  let previousOutput = 0;
-  return (input: number) => {
-    previousOutput += smoothingFactor * (input - previousOutput);
-    return previousOutput;
-  };
-}
 
 interface BandLimitedNoiseTracks {
   low: Float32Array;

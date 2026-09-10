@@ -46,43 +46,52 @@ function buildObjectBox(overrides: Partial<RoomBox> = {}): RoomBox {
 }
 
 describe('synthesizeRoomImpulseResponse', () => {
-  test('a reflection is no longer stamped as a literal discrete sample — it feeds the noise-based histogram like every other arrival', () => {
+  test('a first-bounce reflection is rendered as a discrete, band-filtered tap at its own arrival time, not folded into the noise histogram', () => {
     // Same geometry as traceRays.test.ts's basic bounce case: source(5,0,0) -> object hit(1,0,0) -> listener(8,0,0),
-    // an 11m path arriving at ~32ms.
+    // an 11m path arriving at ~32ms. With `maximumBounces: 1`, this is necessarily a first ("bounceOrder: 0")
+    // bounce, so `renderDiscreteReflectionTaps.ts` — not the noise histogram — is what puts it in the IR.
     const scene: RoomScene = { boxes: [buildObjectBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
     const params = buildParams();
 
     const [reflection] = traceRays(scene, params);
     expect(reflection).toBeDefined();
+    expect(reflection.bounceOrder).toBe(0);
     const reflectionSampleIndex = Math.round(reflection.timeSeconds * SAMPLE_RATE);
 
     const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params);
 
-    // With zero-noise randomSource, the reflection contributes silence on every channel — it now modulates
-    // noise instead of being written as an unconditional literal delta, which is the actual regression check
-    // for the fix: the old discrete-stamping path always produced a nonzero sample here regardless of noise.
-    for (const impulseResponse of channels) {
-      expect(impulseResponse[reflectionSampleIndex]).toBe(0);
+    // FIXED_RANDOM_SOURCE always returns 0.5, which zeroes out both the noise path's white-noise samples
+    // *and* the discrete-tap path's per-tap jitter (see `renderDiscreteReflectionTaps.ts`) — so if the old
+    // noise-only routing were still in effect, this sample would be exactly silent. It isn't: the discrete
+    // tap lands here deterministically regardless of "noise", and (with zero jitter) identically on every
+    // channel.
+    const [firstChannel, ...otherChannels] = channels;
+    expect(firstChannel[reflectionSampleIndex]).toBeGreaterThan(0);
+    for (const impulseResponse of otherChannels) {
+      expect(impulseResponse[reflectionSampleIndex]).toBeCloseTo(firstChannel[reflectionSampleIndex]);
+    }
 
-      // The direct, unreflected path (3m, unoccluded) is a true single impulse (not noise-modulated), so it's
-      // unaffected and still shows up exactly, identically on every channel.
-      const directSampleIndex = Math.round((3 / SPEED_OF_SOUND) * SAMPLE_RATE);
+    // The direct, unreflected path (3m, unoccluded) is still a true single impulse, unaffected by any of
+    // this, and still shows up exactly, identically on every channel.
+    const directSampleIndex = Math.round((3 / SPEED_OF_SOUND) * SAMPLE_RATE);
+    for (const impulseResponse of channels) {
       expect(impulseResponse[directSampleIndex]).toBeCloseTo(1 / 3);
     }
   });
 
-  test('a high-scatter material (grass) is also routed through the histogram, not a special-cased discrete spike', () => {
+  test('a high-scatter material (grass)\'s first bounce is also rendered as a discrete tap — bounce order decides the path, not roughness', () => {
     const roughObject = buildObjectBox({ materialId: 'grass' });
     const scene: RoomScene = { boxes: [roughObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
     const params = buildParams();
 
     const [reflection] = traceRays(scene, params);
     expect(reflection).toBeDefined();
+    expect(reflection.bounceOrder).toBe(0);
     const reflectionSampleIndex = Math.round(reflection.timeSeconds * SAMPLE_RATE);
 
     const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params);
     for (const impulseResponse of channels) {
-      expect(impulseResponse[reflectionSampleIndex]).toBe(0);
+      expect(impulseResponse[reflectionSampleIndex]).toBeGreaterThan(0);
     }
   });
 
