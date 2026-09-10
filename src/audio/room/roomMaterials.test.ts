@@ -76,7 +76,12 @@ describe('getEffectiveScatterAmount', () => {
   });
 
   test('clamps to 1 when textureIntensity pushes the product above 1', () => {
-    const box = buildBox({ materialId: 'grass', textureIntensity: 2 });
+    // No catalog material's scatterAmount is high enough on its own to clamp at the maximum textureIntensity
+    // (2) — every entry is calibrated well below 0.5 (see roomMaterials.ts) — so this isolates the clamp math
+    // directly on a box rather than depending on a specific catalog value staying above 0.5.
+    const roughestMaterial = ROOM_MATERIALS.reduce((roughest, material) => (material.scatterAmount > roughest.scatterAmount ? material : roughest));
+    expect(roughestMaterial.scatterAmount * 2).toBeLessThan(1); // sanity check: the catalog really can't reach the clamp unaided
+    const box = buildBox({ materialId: roughestMaterial.id, textureIntensity: 2 / roughestMaterial.scatterAmount });
     expect(getEffectiveScatterAmount(box)).toBe(1);
   });
 

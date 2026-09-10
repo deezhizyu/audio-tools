@@ -95,11 +95,11 @@ describe('traceRays', () => {
     // Same geometry, only the hit object's material differs. The shadow-ray contribution's diffuse lobe
     // weight is directly proportional to the hit surface's effective scatter amount (see
     // `getEffectiveScatterAmount`/`recordReflectionArrival`), so a near-specular material (smooth metal,
-    // scatterAmount 0.05) and a highly diffuse one (concrete, scatterAmount 0.7) must produce measurably
-    // different arrival energy for the same bounce — confirming scattering is now read per-hit-box rather
-    // than from one fixed global constant.
+    // scatterAmount 0.05) and a diffuse one (grass, scatterAmount 0.3) must produce measurably different
+    // arrival energy for the same bounce — confirming scattering is now read per-hit-box rather than from one
+    // fixed global constant.
     const smoothObject = buildObjectBox({ materialId: 'smooth-metal' });
-    const roughObject = buildObjectBox({ materialId: 'concrete' });
+    const roughObject = buildObjectBox({ materialId: 'grass' });
 
     const smoothResult = traceRays({ boxes: [smoothObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } }, buildParams());
     const roughResult = traceRays({ boxes: [roughObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } }, buildParams());

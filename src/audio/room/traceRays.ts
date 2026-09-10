@@ -218,22 +218,14 @@ export function traceRays(scene: RoomScene, params: RayTracingParams): ImpulseAr
       if (maximumBandValue(energyAfterAbsorption) < params.minimumEnergyThreshold) break;
       energy = energyAfterAbsorption;
 
-      const specularDirection = reflectVector(direction, hit.normal);
-      const scatterDirection = randomHemisphereVector(hit.normal, params.randomSource);
-      direction = normalizeMixedDirection(specularDirection, scatterDirection, hitScatterAmount);
+      // A stochastic pick between a pure diffuse (hemisphere) direction and the pure specular reflection —
+      // never a blend of both — matching Steam Audio's own `bounce()`. Averaging the two directions into one
+      // vector (an earlier version of this function) isn't a sample of any real BRDF lobe; this is.
+      direction =
+        params.randomSource() < hitScatterAmount ? randomHemisphereVector(hit.normal, params.randomSource) : reflectVector(direction, hit.normal);
       position = addVectors(hitPoint, scaleVector(hit.normal, SURFACE_OFFSET_METERS));
     }
   }
 
   return arrivals;
-}
-
-function normalizeMixedDirection(specular: Vector3, scattered: Vector3, scatterAmount: number): Vector3 {
-  const mixed = {
-    x: specular.x * (1 - scatterAmount) + scattered.x * scatterAmount,
-    y: specular.y * (1 - scatterAmount) + scattered.y * scatterAmount,
-    z: specular.z * (1 - scatterAmount) + scattered.z * scatterAmount,
-  };
-  const length = Math.sqrt(mixed.x * mixed.x + mixed.y * mixed.y + mixed.z * mixed.z);
-  return length < 1e-9 ? specular : scaleVector(mixed, 1 / length);
 }

@@ -56,17 +56,19 @@ describe('synthesizeRoomImpulseResponse', () => {
     expect(reflection).toBeDefined();
     const reflectionSampleIndex = Math.round(reflection.timeSeconds * SAMPLE_RATE);
 
-    const impulseResponse = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params);
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params);
 
-    // With zero-noise randomSource, the reflection contributes silence — it now modulates noise instead of
-    // being written as an unconditional literal delta, which is the actual regression check for the fix: the
-    // old discrete-stamping path always produced a nonzero sample here regardless of noise.
-    expect(impulseResponse[reflectionSampleIndex]).toBe(0);
+    // With zero-noise randomSource, the reflection contributes silence on every channel — it now modulates
+    // noise instead of being written as an unconditional literal delta, which is the actual regression check
+    // for the fix: the old discrete-stamping path always produced a nonzero sample here regardless of noise.
+    for (const impulseResponse of channels) {
+      expect(impulseResponse[reflectionSampleIndex]).toBe(0);
 
-    // The direct, unreflected path (3m, unoccluded) is a true single impulse (not noise-modulated), so it's
-    // unaffected and still shows up exactly.
-    const directSampleIndex = Math.round((3 / SPEED_OF_SOUND) * SAMPLE_RATE);
-    expect(impulseResponse[directSampleIndex]).toBeCloseTo(1 / 3);
+      // The direct, unreflected path (3m, unoccluded) is a true single impulse (not noise-modulated), so it's
+      // unaffected and still shows up exactly, identically on every channel.
+      const directSampleIndex = Math.round((3 / SPEED_OF_SOUND) * SAMPLE_RATE);
+      expect(impulseResponse[directSampleIndex]).toBeCloseTo(1 / 3);
+    }
   });
 
   test('a high-scatter material (grass) is also routed through the histogram, not a special-cased discrete spike', () => {
@@ -78,8 +80,10 @@ describe('synthesizeRoomImpulseResponse', () => {
     expect(reflection).toBeDefined();
     const reflectionSampleIndex = Math.round(reflection.timeSeconds * SAMPLE_RATE);
 
-    const impulseResponse = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params);
-    expect(impulseResponse[reflectionSampleIndex]).toBe(0);
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params);
+    for (const impulseResponse of channels) {
+      expect(impulseResponse[reflectionSampleIndex]).toBe(0);
+    }
   });
 
   test('an early and a late reflection both land in the same time-binned histogram, at their own true arrival time', () => {

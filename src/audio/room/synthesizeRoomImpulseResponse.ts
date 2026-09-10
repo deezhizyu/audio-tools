@@ -16,7 +16,7 @@ import { traceRays, type RayTracingParams } from './traceRays';
  * always a true single impulse (it's a single deterministic straight line, not a Monte Carlo sample), handled
  * separately by `directSound.ts`.
  */
-export function synthesizeRoomImpulseResponse(scene: RoomScene, sampleRate: number, rayTracingParams: RayTracingParams): Float32Array<ArrayBuffer> {
+export function synthesizeRoomImpulseResponse(scene: RoomScene, sampleRate: number, rayTracingParams: RayTracingParams): Float32Array<ArrayBuffer>[] {
   const arrivals = traceRays(scene, rayTracingParams);
 
   const histogram = buildEnergyHistogram(
