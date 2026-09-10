@@ -1,9 +1,13 @@
 import { synthesizeRoomImpulseResponse } from '../room/synthesizeRoomImpulseResponse';
-import { DEFAULT_RAY_TRACING_PARAMS } from '../room/traceRays';
-import type { RoomAcousticsWorkerRequest, RoomAcousticsWorkerResponse } from './roomAcousticsWorkerMessages';
+import { DEFAULT_RAY_TRACING_PARAMS, INTERACTIVE_RAY_TRACING_PARAMS, type RayTracingParams } from '../room/traceRays';
+import type { RoomAcousticsWorkerRequest, RoomAcousticsWorkerResponse, SimulationQuality } from './roomAcousticsWorkerMessages';
 
 function respond(response: RoomAcousticsWorkerResponse, transferables: Transferable[] = []): void {
   self.postMessage(response, { transfer: transferables });
+}
+
+function rayTracingParamsForQuality(quality: SimulationQuality): RayTracingParams {
+  return quality === 'interactive' ? INTERACTIVE_RAY_TRACING_PARAMS : DEFAULT_RAY_TRACING_PARAMS;
 }
 
 self.onmessage = (event: MessageEvent<RoomAcousticsWorkerRequest>) => {
@@ -15,7 +19,7 @@ self.onmessage = (event: MessageEvent<RoomAcousticsWorkerRequest>) => {
         const impulseResponseChannelData = synthesizeRoomImpulseResponse(
           request.scene,
           request.sampleRate,
-          DEFAULT_RAY_TRACING_PARAMS,
+          rayTracingParamsForQuality(request.quality),
           request.stereoSimulationEnabled,
         );
 

@@ -1,5 +1,5 @@
 import type { RoomScene } from '../room/roomTypes';
-import type { RoomAcousticsWorkerRequest, RoomAcousticsWorkerResponse } from './roomAcousticsWorkerMessages';
+import type { RoomAcousticsWorkerRequest, RoomAcousticsWorkerResponse, SimulationQuality } from './roomAcousticsWorkerMessages';
 
 export interface SimulateRoomResult {
   impulseResponseChannelData: Float32Array<ArrayBuffer>[];
@@ -37,9 +37,9 @@ export class RoomAcousticsWorkerClient {
     });
   }
 
-  async simulate(scene: RoomScene, sampleRate: number, stereoSimulationEnabled: boolean): Promise<SimulateRoomResult> {
+  async simulate(scene: RoomScene, sampleRate: number, stereoSimulationEnabled: boolean, quality: SimulationQuality): Promise<SimulateRoomResult> {
     const requestId = this.nextRequestId++;
-    const response = await this.sendRequest({ type: 'simulate', requestId, scene, sampleRate, stereoSimulationEnabled });
+    const response = await this.sendRequest({ type: 'simulate', requestId, scene, sampleRate, stereoSimulationEnabled, quality });
     if (response.type !== 'simulate') throw new Error('Unexpected response to simulate.');
     return { impulseResponseChannelData: response.impulseResponseChannelData, sampleRate: response.sampleRate };
   }

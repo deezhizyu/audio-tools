@@ -19,11 +19,15 @@ import type { RoomBox, RoomBoxKind, RoomMaterialId, RoomPoint3D, RoomScene } fro
 import { SimpleAudioPlaybackController } from '../audio/SimpleAudioPlaybackController';
 import type { ExportAudioFormat } from '../audio/types';
 import { RoomAcousticsWorkerClient } from '../audio/worker/RoomAcousticsWorkerClient';
+import type { SimulationQuality } from '../audio/worker/roomAcousticsWorkerMessages';
 import type { RoomEditorTool } from '../components/room/RoomOrthographicView';
 import { downloadBlob } from '../utils/downloadBlob';
 
-/** Long enough that a continuous box drag only triggers one re-simulation per pause, short enough that the
-    result still feels responsive to the edit that caused it. */
+/** Long enough that a continuous box drag only triggers one full-quality re-simulation per pause, short enough
+    that the accurate result still feels responsive once the edit that caused it stops. Every edit also
+    triggers an immediate `INTERACTIVE_RAY_TRACING_PARAMS` preview pass (see `triggerInteractivePreview`),
+    which is what actually keeps audio live while dragging — this debounce is only about when the accurate,
+    full-quality pass replaces that preview. */
 const RESIMULATE_DEBOUNCE_MILLISECONDS = 250;
 
 // --- Room geometry signals — independent of the loaded audio file, so nothing that touches audio ever needs
@@ -71,31 +75,61 @@ let latestImpulseResponseChannelData: Float32Array<ArrayBuffer>[] = [];
 let activePlaybackController: SimpleAudioPlaybackController | null = null;
 let activeWorkerClient: RoomAcousticsWorkerClient | null = null;
 let resimulateTimeoutId: ReturnType<typeof setTimeout> | null = null;
-/** Bumped on every simulation start; a still-running simulation whose token has been superseded by a newer
-    edit discards its result instead of overwriting the newer one that may finish first. */
+/** Bumped on every simulation start (either quality); a still-running simulation whose token has been
+    superseded by a newer one — interactive or full, doesn't matter which — discards its result instead of
+    overwriting the newer one that may finish first. */
 let resimulateRequestToken = 0;
+/** Coalesces `triggerInteractivePreview` calls: at most one interactive-quality simulation runs at a time, no
+    matter how many edits arrive while it's in flight (a continuous drag fires this on every pointer-move). */
+let interactiveSimulationInFlight = false;
+/** Set when an edit arrives while an interactive pass is already running, so that pass's completion kicks off
+    exactly one more covering the latest scene, instead of either dropping the edit or queuing one call per
+    pointer-move. */
+let interactiveSimulationSceneChangedSinceStart = false;
 
 function currentScene(): RoomScene {
   return { boxes: roomBoxes.value, source: sourcePosition.value, listener: listenerPosition.value };
 }
 
+/** Runs a fast, rough `INTERACTIVE_RAY_TRACING_PARAMS` pass immediately on every edit — this, not the
+    debounced full-quality pass below, is what makes dragging a box or the listener update the sound live
+    instead of only after the drag stops. Self-throttling: a drag firing this many times per second still only
+    ever has one interactive simulation in flight, always covering whatever the scene looked like most
+    recently rather than working through a backlog of stale ones. */
+function triggerInteractivePreview(): void {
+  if (interactiveSimulationInFlight) {
+    interactiveSimulationSceneChangedSinceStart = true;
+    return;
+  }
+
+  interactiveSimulationInFlight = true;
+  interactiveSimulationSceneChangedSinceStart = false;
+  void runSimulation('interactive').finally(() => {
+    interactiveSimulationInFlight = false;
+    if (interactiveSimulationSceneChangedSinceStart) triggerInteractivePreview();
+  });
+}
+
 function scheduleResimulate(): void {
+  triggerInteractivePreview();
+
   if (resimulateTimeoutId !== null) clearTimeout(resimulateTimeoutId);
   resimulateTimeoutId = setTimeout(() => {
     resimulateTimeoutId = null;
-    void runSimulation();
+    void runSimulation('full');
   }, RESIMULATE_DEBOUNCE_MILLISECONDS);
 }
 
-/** If an edit's debounced resimulation hasn't fired yet, runs it immediately and waits for it — so an export
-    started right after an edit renders that edit's room, not whatever impulse response happened to be latest
-    when Download was clicked. Doesn't wait for an already-in-flight simulation (ray tracing is fast enough,
-    and bounded by `MAXIMUM_BOUNCES`/`NUMBER_OF_RAYS`, that this window is negligible), only a pending one. */
+/** If an edit's debounced full-quality resimulation hasn't fired yet, runs it immediately and waits for it —
+    so an export started right after an edit renders that edit's room at full quality, not whatever interactive
+    preview happened to be latest when Download was clicked. Doesn't wait for an already-in-flight simulation
+    (ray tracing is fast enough, and bounded by `MAXIMUM_BOUNCES`/`NUMBER_OF_RAYS`, that this window is
+    negligible), only a pending one. */
 async function flushPendingResimulate(): Promise<void> {
   if (resimulateTimeoutId === null) return;
   clearTimeout(resimulateTimeoutId);
   resimulateTimeoutId = null;
-  await runSimulation();
+  await runSimulation('full');
 }
 
 /** Reuses the same controller (and its `AudioContext`) across every resimulation instead of tearing one down
@@ -131,27 +165,34 @@ function startLivePlaybackFromLatestSimulation(): void {
   if (wasPlaying) activePlaybackController.play(Math.min(resumeFromSeconds, activePlaybackController.durationSeconds));
 }
 
-async function runSimulation(): Promise<void> {
+/** `quality: 'interactive'` runs a fast, rough preview pass and only ever updates what's audible — it never
+    touches `isSimulatingReverb`/`hasCompletedSimulation`/`reverbErrorMessage`, so the "Simulating…"/"Simulated"
+    status line reflects the accurate full-quality pass, not the many quick previews a drag fires per second.
+    A failed interactive pass fails silently for the same reason: the debounced full pass that follows it will
+    surface a real error if the room genuinely can't be simulated. */
+async function runSimulation(quality: SimulationQuality): Promise<void> {
   if (dryChannelData.length === 0 || drySampleRate === 0) return;
 
   const requestToken = ++resimulateRequestToken;
-  isSimulatingReverb.value = true;
-  reverbErrorMessage.value = null;
+  if (quality === 'full') {
+    isSimulatingReverb.value = true;
+    reverbErrorMessage.value = null;
+  }
 
   try {
     if (!activeWorkerClient) activeWorkerClient = new RoomAcousticsWorkerClient();
-    const { impulseResponseChannelData } = await activeWorkerClient.simulate(currentScene(), drySampleRate, stereoSimulationEnabled.value);
+    const { impulseResponseChannelData } = await activeWorkerClient.simulate(currentScene(), drySampleRate, stereoSimulationEnabled.value, quality);
     if (requestToken !== resimulateRequestToken) return;
 
     latestImpulseResponseChannelData = impulseResponseChannelData;
     startLivePlaybackFromLatestSimulation();
-    hasCompletedSimulation.value = true;
+    if (quality === 'full') hasCompletedSimulation.value = true;
   } catch (caughtError) {
-    if (requestToken === resimulateRequestToken) {
+    if (quality === 'full' && requestToken === resimulateRequestToken) {
       reverbErrorMessage.value = caughtError instanceof Error ? caughtError.message : 'Could not simulate this room.';
     }
   } finally {
-    if (requestToken === resimulateRequestToken) isSimulatingReverb.value = false;
+    if (quality === 'full' && requestToken === resimulateRequestToken) isSimulatingReverb.value = false;
   }
 }
 
@@ -173,7 +214,7 @@ export async function loadDryAudioFile(file: File): Promise<void> {
     dryChannelData = decoded.channelData;
     drySampleRate = decoded.sampleRate;
     uploadedAudioFileName.value = file.name;
-    await runSimulation();
+    await runSimulation('full');
   } catch (caughtError) {
     reverbErrorMessage.value = caughtError instanceof Error ? caughtError.message : 'Could not read this audio file.';
     uploadedAudioFileName.value = null;

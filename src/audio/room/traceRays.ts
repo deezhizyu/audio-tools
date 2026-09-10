@@ -4,6 +4,8 @@ import { getEffectiveScatterAmount } from './roomMaterials';
 import { toAxisAlignedBox } from './roomBoxGeometry';
 import { horizontalPanPosition } from './stereoPanning';
 import {
+  INTERACTIVE_MAXIMUM_BOUNCES,
+  INTERACTIVE_NUMBER_OF_RAYS,
   MAXIMUM_BOUNCES,
   MAXIMUM_RAY_DISTANCE_METERS,
   MINIMUM_CONTRIBUTION_DISTANCE_METERS,
@@ -43,6 +45,15 @@ export const DEFAULT_RAY_TRACING_PARAMS: RayTracingParams = {
   minimumEnergyThreshold: MINIMUM_ENERGY_THRESHOLD,
   maximumDistanceMeters: MAXIMUM_RAY_DISTANCE_METERS,
   randomSource: Math.random,
+};
+
+/** The same physical parameters as `DEFAULT_RAY_TRACING_PARAMS`, but with a much smaller ray/bounce budget —
+    used for the live preview pass that runs while the room is actively being edited (see
+    `INTERACTIVE_NUMBER_OF_RAYS`'s comment for why). */
+export const INTERACTIVE_RAY_TRACING_PARAMS: RayTracingParams = {
+  ...DEFAULT_RAY_TRACING_PARAMS,
+  numberOfRays: INTERACTIVE_NUMBER_OF_RAYS,
+  maximumBounces: INTERACTIVE_MAXIMUM_BOUNCES,
 };
 
 export interface ImpulseArrival {
