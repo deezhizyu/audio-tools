@@ -58,7 +58,11 @@ describe('synthesizeRoomImpulseResponse', () => {
     expect(reflection.bounceOrder).toBe(0);
     const reflectionSampleIndex = Math.round(reflection.timeSeconds * SAMPLE_RATE);
 
-    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params);
+    // Stereo simulation off here: this test is about tap routing/placement, not panning (this geometry's
+    // source and listener differ only along the left/right axis, so an enabled stereo simulation would pan
+    // both the direct sound and the reflection hard left, deliberately breaking the "identical on every
+    // channel" assertions below) — panning itself is covered in its own test further down.
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params, false);
 
     // FIXED_RANDOM_SOURCE always returns 0.5, which zeroes out both the noise path's white-noise samples
     // *and* the discrete-tap path's per-tap jitter (see `renderDiscreteReflectionTaps.ts`) — so if the old
@@ -89,7 +93,7 @@ describe('synthesizeRoomImpulseResponse', () => {
     expect(reflection.bounceOrder).toBe(0);
     const reflectionSampleIndex = Math.round(reflection.timeSeconds * SAMPLE_RATE);
 
-    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params);
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params, false); // see comment on the test above
     for (const impulseResponse of channels) {
       expect(impulseResponse[reflectionSampleIndex]).toBeGreaterThan(0);
     }
@@ -117,5 +121,28 @@ describe('synthesizeRoomImpulseResponse', () => {
 
     expect(histogram.low[Math.floor(nearArrival.timeSeconds / HISTOGRAM_BIN_DURATION_SECONDS)]).toBeGreaterThan(0);
     expect(histogram.low[Math.floor(farArrival.timeSeconds / HISTOGRAM_BIN_DURATION_SECONDS)]).toBeGreaterThan(0);
+  });
+
+  test('with stereo simulation enabled, a source placed hard left of the listener is heard louder on the left channel than the right', () => {
+    // Source and listener differ only in x (the left/right axis — see TOP_VIEW_AXES in RoomEditor.tsx), with
+    // the source on the negative side, so both the direct path and the object's reflection arrive from the
+    // listener's left.
+    const scene: RoomScene = { boxes: [buildObjectBox({ x: 2 })], source: { x: -5, y: 0, z: 0 }, listener: { x: 0, y: 0, z: 0 } };
+    const params = buildParams();
+
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params, true);
+
+    const totalEnergy = (impulseResponse: Float32Array<ArrayBuffer>) => Array.from(impulseResponse).reduce((sum, sample) => sum + sample * sample, 0);
+    expect(totalEnergy(channels[0])).toBeGreaterThan(totalEnergy(channels[1]));
+  });
+
+  test('with stereo simulation disabled, a source placed hard left of the listener is still heard identically on every channel', () => {
+    const scene: RoomScene = { boxes: [buildObjectBox({ x: 2 })], source: { x: -5, y: 0, z: 0 }, listener: { x: 0, y: 0, z: 0 } };
+    const params = buildParams();
+
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params, false);
+
+    const totalEnergy = (impulseResponse: Float32Array<ArrayBuffer>) => Array.from(impulseResponse).reduce((sum, sample) => sum + sample * sample, 0);
+    expect(totalEnergy(channels[0])).toBeCloseTo(totalEnergy(channels[1]));
   });
 });

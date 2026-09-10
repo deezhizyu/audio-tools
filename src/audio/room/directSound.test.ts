@@ -41,5 +41,21 @@ describe('computeDirectSoundPath', () => {
     const path = computeDirectSoundPath(scene);
     expect(path.distanceMeters).toBe(0);
     expect(path.isOccluded).toBe(false);
+    expect(path.panPosition).toBe(0);
+  });
+
+  test('reports a positive (right) pan position for a source to the right of the listener', () => {
+    const scene: RoomScene = { boxes: [], source: { x: 5, y: 0, z: 0 }, listener: { x: 0, y: 0, z: 0 } };
+    expect(computeDirectSoundPath(scene).panPosition).toBeGreaterThan(0);
+  });
+
+  test('reports a negative (left) pan position for a source to the left of the listener', () => {
+    const scene: RoomScene = { boxes: [], source: { x: -5, y: 0, z: 0 }, listener: { x: 0, y: 0, z: 0 } };
+    expect(computeDirectSoundPath(scene).panPosition).toBeLessThan(0);
+  });
+
+  test('reports a centered pan position for a source directly ahead of the listener', () => {
+    const scene: RoomScene = { boxes: [], source: { x: 0, y: 0, z: 5 }, listener: { x: 0, y: 0, z: 0 } };
+    expect(computeDirectSoundPath(scene).panPosition).toBeCloseTo(0);
   });
 });

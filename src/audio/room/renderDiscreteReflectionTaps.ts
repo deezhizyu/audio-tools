@@ -1,10 +1,10 @@
 import { buildBandImpulseKernel } from './bandSplitFilters';
+import { stereoPanWeightsFromPosition } from './stereoPanning';
 import type { ImpulseArrival } from './traceRays';
 
 /** Small per-tap randomization so the two output channels don't stay perfectly identical for the reflection
-    taps either (matching the noise-tail decorrelation in `synthesizeImpulseResponseFromHistogram.ts`) —
-    without pretending to know which ear a tap should actually favor, since `RoomScene`'s listener has no
-    facing direction to compute a real interaural difference from. */
+    taps either (matching the noise-tail decorrelation in `synthesizeImpulseResponseFromHistogram.ts`), on top
+    of whatever left/right bias `stereoSimulationEnabled` applies from each arrival's own `panPosition`. */
 const TAP_DELAY_JITTER_SAMPLES = 1;
 const TAP_GAIN_JITTER_FRACTION = 0.15;
 
@@ -30,24 +30,32 @@ function jitteredDelaySamples(randomSource: () => number): number {
  * (`convolveWithImpulseResponse.ts`), reproduces exactly that: a genuine delayed copy of the source.
  *
  * Mutates `channels` in place, the same way the direct-sound spike in
- * `synthesizeImpulseResponseFromHistogram.ts` already does.
+ * `synthesizeImpulseResponseFromHistogram.ts` already does. When `stereoSimulationEnabled` is on, each
+ * arrival's amplitude is additionally scaled per channel by Steam Audio's constant-power stereo pan law
+ * (`stereoPanning.ts`) applied to the arrival's own `panPosition`, so a bounce reflecting in from one side of
+ * the listener favors that channel; when it's off, every arrival keeps full amplitude on both channels, as
+ * before this option existed.
  */
 export function renderDiscreteReflectionTaps(
   channels: Float32Array<ArrayBuffer>[],
   firstBounceArrivals: ImpulseArrival[],
   sampleRate: number,
   numberOfRays: number,
+  stereoSimulationEnabled: boolean,
   randomSource: () => number = Math.random,
 ): void {
   const kernel = buildBandImpulseKernel(sampleRate);
   const normalizationFactor = 1 / Math.max(1, numberOfRays);
 
-  for (const channel of channels) {
+  channels.forEach((channel, channelIndex) => {
     for (const arrival of firstBounceArrivals) {
       const delaySampleIndex = Math.round(arrival.timeSeconds * sampleRate) + jitteredDelaySamples(randomSource);
       if (delaySampleIndex < 0 || delaySampleIndex >= channel.length) continue;
 
-      const gain = jitteredGain(randomSource);
+      const panWeights = stereoSimulationEnabled ? stereoPanWeightsFromPosition(arrival.panPosition) : { left: 1, right: 1 };
+      const channelPanWeight = channelIndex === 0 ? panWeights.left : panWeights.right;
+
+      const gain = jitteredGain(randomSource) * channelPanWeight;
       const lowAmplitude = gain * Math.sqrt(arrival.energy.low * normalizationFactor);
       const midAmplitude = gain * Math.sqrt(arrival.energy.mid * normalizationFactor);
       const highAmplitude = gain * Math.sqrt(arrival.energy.high * normalizationFactor);
@@ -58,5 +66,5 @@ export function renderDiscreteReflectionTaps(
           lowAmplitude * kernel.low[kernelIndex] + midAmplitude * kernel.mid[kernelIndex] + highAmplitude * kernel.high[kernelIndex];
       }
     }
-  }
+  });
 }

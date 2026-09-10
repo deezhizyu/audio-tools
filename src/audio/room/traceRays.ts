@@ -2,6 +2,7 @@ import { applyAirAbsorption } from './airAbsorption';
 import { intersectRayWithBox, type AxisAlignedBox, type Ray } from './rayBoxIntersection';
 import { getEffectiveScatterAmount } from './roomMaterials';
 import { toAxisAlignedBox } from './roomBoxGeometry';
+import { horizontalPanPosition } from './stereoPanning';
 import {
   MAXIMUM_BOUNCES,
   MAXIMUM_RAY_DISTANCE_METERS,
@@ -55,6 +56,11 @@ export interface ImpulseArrival {
       route first-bounce arrivals to a coherent, discrete-tap renderer and everything else to the existing
       noise-based one — see `renderDiscreteReflectionTaps.ts`. */
   bounceOrder: number;
+  /** This arrival's left/right position as heard from the listener (-1 fully left, +1 fully right, 0
+      centered) — see `horizontalPanPosition` in `stereoPanning.ts`. Always computed, so stereo simulation
+      can be toggled purely at consumption time (`renderDiscreteReflectionTaps.ts`, `buildEnergyHistogram.ts`)
+      without re-tracing rays. */
+  panPosition: number;
 }
 
 /** A small offset nudging a point off the surface it sits on, so the next intersection test doesn't
@@ -182,10 +188,14 @@ function recordReflectionArrival(
   const attenuation = (diffuseLobeWeight + specularLobeWeight) / (clampedDistance * clampedDistance);
   const totalDistance = distanceTraveledToHit + distanceToListener;
 
+  // The arrival reaches the listener from `originPoint`, i.e. along the reverse of `directionToListener`.
+  const panPosition = horizontalPanPosition(scaleVector(directionToListener, -1));
+
   arrivals.push({
     timeSeconds: totalDistance / params.speedOfSoundMetersPerSecond,
     energy: applyAirAbsorption(scaleBandValues(energyAtHit, attenuation), totalDistance),
     bounceOrder,
+    panPosition,
   });
 }
 

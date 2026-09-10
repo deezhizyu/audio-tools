@@ -12,7 +12,12 @@ self.onmessage = (event: MessageEvent<RoomAcousticsWorkerRequest>) => {
   try {
     switch (request.type) {
       case 'simulate': {
-        const impulseResponseChannelData = synthesizeRoomImpulseResponse(request.scene, request.sampleRate, DEFAULT_RAY_TRACING_PARAMS);
+        const impulseResponseChannelData = synthesizeRoomImpulseResponse(
+          request.scene,
+          request.sampleRate,
+          DEFAULT_RAY_TRACING_PARAMS,
+          request.stereoSimulationEnabled,
+        );
 
         respond(
           { type: 'simulate', requestId: request.requestId, impulseResponseChannelData, sampleRate: request.sampleRate },

@@ -38,6 +38,12 @@ export const activeRoomEditorTool = signal<RoomEditorTool>('select');
     (see `computeBoxMoveSnapOffset`/`snapPointToCandidates` in `roomEditorGeometry.ts`). Purely an editor
     convenience — it never affects the drawn room's saved geometry beyond where a drag happens to land. */
 export const snapToAlignmentEnabled = signal(true);
+/** Whether reflections are panned left/right by direction (Steam Audio's constant-power stereo pan law — see
+    `stereoPanning.ts`) instead of landing centered on both channels. On by default: it's what makes a room
+    with a source and listener on opposite sides actually sound like it has a left and a right. Editor-only,
+    like `snapToAlignmentEnabled` — it's not part of a saved room's geometry, so it isn't serialized by
+    `saveRoomToFile`/`importRoomFromFile`. */
+export const stereoSimulationEnabled = signal(true);
 
 // --- Audio signals — independent of the drawn room, so loading/replacing a file never touches the signals
 //     above. -----------------------------------------------------------------------------------------------
@@ -115,7 +121,7 @@ async function runSimulationAndConvolve(): Promise<void> {
 
   try {
     if (!activeWorkerClient) activeWorkerClient = new RoomAcousticsWorkerClient();
-    const { impulseResponseChannelData } = await activeWorkerClient.simulate(currentScene(), drySampleRate);
+    const { impulseResponseChannelData } = await activeWorkerClient.simulate(currentScene(), drySampleRate, stereoSimulationEnabled.value);
     if (requestToken !== resimulateRequestToken) return;
 
     const { channelData, sampleRate } = await convolveWithImpulseResponse(dryChannelData, drySampleRate, impulseResponseChannelData);
@@ -229,6 +235,11 @@ export function setActiveRoomEditorTool(tool: RoomEditorTool): void {
 
 export function toggleSnapToAlignment(): void {
   snapToAlignmentEnabled.value = !snapToAlignmentEnabled.value;
+}
+
+export function toggleStereoSimulation(): void {
+  stereoSimulationEnabled.value = !stereoSimulationEnabled.value;
+  scheduleResimulate();
 }
 
 export function updateSelectedBoxesAbsorptionBand(band: 'low' | 'mid' | 'high', value: number): void {
