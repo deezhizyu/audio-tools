@@ -86,6 +86,14 @@ let interactiveSimulationInFlight = false;
     exactly one more covering the latest scene, instead of either dropping the edit or queuing one call per
     pointer-move. */
 let interactiveSimulationSceneChangedSinceStart = false;
+/** How often the live playback graph is actually allowed to pick up a freshly simulated impulse response — a
+    touch longer than `SimpleAudioPlaybackController`'s own crossfade, so consecutive swaps during a fast drag
+    each get a clean crossfade instead of piling several half-faded voices on top of one another. This only
+    throttles how often the *latest* result reaches the speakers; the interactive-preview ray tracing itself
+    (`triggerInteractivePreview`) still runs as fast as it can. */
+const LIVE_PLAYBACK_UPDATE_MIN_INTERVAL_MILLISECONDS = 120;
+let lastLivePlaybackUpdateAtMilliseconds = 0;
+let pendingLivePlaybackUpdateTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
 function currentScene(): RoomScene {
   return { boxes: roomBoxes.value, source: sourcePosition.value, listener: listenerPosition.value };
@@ -165,6 +173,32 @@ function startLivePlaybackFromLatestSimulation(): void {
   if (wasPlaying) activePlaybackController.play(Math.min(resumeFromSeconds, activePlaybackController.durationSeconds));
 }
 
+/** Throttled entry point for `startLivePlaybackFromLatestSimulation` — see
+    `LIVE_PLAYBACK_UPDATE_MIN_INTERVAL_MILLISECONDS`. If called again before the interval has elapsed, doesn't
+    queue a second call on top of an already-queued one: the trailing call always reads
+    `latestImpulseResponseChannelData` at the moment it actually fires, so it picks up whatever's freshest
+    regardless of how many updates arrived in between. */
+function scheduleLivePlaybackUpdate(): void {
+  const now = performance.now();
+  const elapsedSinceLastUpdate = now - lastLivePlaybackUpdateAtMilliseconds;
+
+  if (elapsedSinceLastUpdate >= LIVE_PLAYBACK_UPDATE_MIN_INTERVAL_MILLISECONDS) {
+    lastLivePlaybackUpdateAtMilliseconds = now;
+    startLivePlaybackFromLatestSimulation();
+    return;
+  }
+
+  if (pendingLivePlaybackUpdateTimeoutId !== null) return;
+  pendingLivePlaybackUpdateTimeoutId = setTimeout(
+    () => {
+      pendingLivePlaybackUpdateTimeoutId = null;
+      lastLivePlaybackUpdateAtMilliseconds = performance.now();
+      startLivePlaybackFromLatestSimulation();
+    },
+    LIVE_PLAYBACK_UPDATE_MIN_INTERVAL_MILLISECONDS - elapsedSinceLastUpdate,
+  );
+}
+
 /** `quality: 'interactive'` runs a fast, rough preview pass and only ever updates what's audible — it never
     touches `isSimulatingReverb`/`hasCompletedSimulation`/`reverbErrorMessage`, so the "Simulating…"/"Simulated"
     status line reflects the accurate full-quality pass, not the many quick previews a drag fires per second.
@@ -185,7 +219,7 @@ async function runSimulation(quality: SimulationQuality): Promise<void> {
     if (requestToken !== resimulateRequestToken) return;
 
     latestImpulseResponseChannelData = impulseResponseChannelData;
-    startLivePlaybackFromLatestSimulation();
+    scheduleLivePlaybackUpdate();
     if (quality === 'full') hasCompletedSimulation.value = true;
   } catch (caughtError) {
     if (quality === 'full' && requestToken === resimulateRequestToken) {
