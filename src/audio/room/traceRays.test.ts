@@ -48,6 +48,8 @@ describe('traceRays', () => {
 
     expect(arrivals).toHaveLength(1);
     expect(arrivals[0].timeSeconds).toBeCloseTo(11 / 343, 5);
+    // The reflection point (around x=1) sits to the left of the listener (x=8) along the left/right axis.
+    expect(arrivals[0].panPosition).toBeLessThan(0);
   });
 
   test('an absorber ends the ray immediately, contributing no reflection arrival', () => {

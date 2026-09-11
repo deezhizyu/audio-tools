@@ -1,4 +1,5 @@
 import { signal } from '@preact/signals';
+import { blendImpulseResponses } from '../audio/blendImpulseResponses';
 import { buildAudioBufferFromChannels } from '../audio/buildAudioBufferFromChannels';
 import { convolveWithImpulseResponse } from '../audio/convolveWithImpulseResponse';
 import { decodeAudioFile } from '../audio/decodeAudioFile';
@@ -19,11 +20,15 @@ import type { RoomBox, RoomBoxKind, RoomMaterialId, RoomPoint3D, RoomScene } fro
 import { SimpleAudioPlaybackController } from '../audio/SimpleAudioPlaybackController';
 import type { ExportAudioFormat } from '../audio/types';
 import { RoomAcousticsWorkerClient } from '../audio/worker/RoomAcousticsWorkerClient';
+import type { SimulationQuality } from '../audio/worker/roomAcousticsWorkerMessages';
 import type { RoomEditorTool } from '../components/room/RoomOrthographicView';
 import { downloadBlob } from '../utils/downloadBlob';
 
-/** Long enough that a continuous box drag only triggers one re-simulation per pause, short enough that the
-    result still feels responsive to the edit that caused it. */
+/** Long enough that a continuous box drag only triggers one full-quality re-simulation per pause, short enough
+    that the accurate result still feels responsive once the edit that caused it stops. Every edit also
+    triggers an immediate `INTERACTIVE_RAY_TRACING_PARAMS` preview pass (see `triggerInteractivePreview`),
+    which is what actually keeps audio live while dragging — this debounce is only about when the accurate,
+    full-quality pass replaces that preview. */
 const RESIMULATE_DEBOUNCE_MILLISECONDS = 250;
 
 // --- Room geometry signals — independent of the loaded audio file, so nothing that touches audio ever needs
@@ -38,6 +43,12 @@ export const activeRoomEditorTool = signal<RoomEditorTool>('select');
     (see `computeBoxMoveSnapOffset`/`snapPointToCandidates` in `roomEditorGeometry.ts`). Purely an editor
     convenience — it never affects the drawn room's saved geometry beyond where a drag happens to land. */
 export const snapToAlignmentEnabled = signal(true);
+/** Whether reflections are panned left/right by direction (Steam Audio's constant-power stereo pan law — see
+    `stereoPanning.ts`) instead of landing centered on both channels. On by default: it's what makes a room
+    with a source and listener on opposite sides actually sound like it has a left and a right. Editor-only,
+    like `snapToAlignmentEnabled` — it's not part of a saved room's geometry, so it isn't serialized by
+    `saveRoomToFile`/`importRoomFromFile`. */
+export const stereoSimulationEnabled = signal(true);
 
 // --- Audio signals — independent of the drawn room, so loading/replacing a file never touches the signals
 //     above. -----------------------------------------------------------------------------------------------
@@ -57,40 +68,106 @@ export const isExportingAudio = signal(false);
 
 let dryChannelData: Float32Array<ArrayBuffer>[] = [];
 let drySampleRate = 0;
-let wetChannelData: Float32Array<ArrayBuffer>[] = [];
-let wetSampleRate = 0;
+/** The latest simulated room's impulse response — always at `drySampleRate` (the room-acoustics worker
+    synthesizes it at whatever rate it's asked for). Live preview plays it through a `ConvolverNode` as soon
+    as it's ready (see `startLivePlaybackFromLatestSimulation`); exporting instead feeds it to
+    `convolveWithImpulseResponse.ts` to render the complete dry file offline, once, at export time. */
+let latestImpulseResponseChannelData: Float32Array<ArrayBuffer>[] = [];
+/** What's actually fed to the live playback graph — `latestImpulseResponseChannelData` blended with whatever
+    this was before (see `blendImpulseResponses.ts`), so the audible reverb character evolves smoothly across
+    simulations instead of snapping to each one's own independent noise. Kept separate from
+    `latestImpulseResponseChannelData` so exporting always renders against the true, unblended latest
+    simulation rather than this smoothed live-preview approximation. */
+let liveImpulseResponseChannelData: Float32Array<ArrayBuffer>[] = [];
 let activePlaybackController: SimpleAudioPlaybackController | null = null;
 let activeWorkerClient: RoomAcousticsWorkerClient | null = null;
 let resimulateTimeoutId: ReturnType<typeof setTimeout> | null = null;
-/** Bumped on every simulation start; a still-running simulation whose token has been superseded by a newer
-    edit discards its result instead of overwriting the newer one that may finish first. */
+/** Bumped on every simulation start (either quality); a still-running simulation whose token has been
+    superseded by a newer one — interactive or full, doesn't matter which — discards its result instead of
+    overwriting the newer one that may finish first. */
 let resimulateRequestToken = 0;
+/** Coalesces `triggerInteractivePreview` calls: at most one interactive-quality simulation runs at a time, no
+    matter how many edits arrive while it's in flight (a continuous drag fires this on every pointer-move). */
+let interactiveSimulationInFlight = false;
+/** Set when an edit arrives while an interactive pass is already running, so that pass's completion kicks off
+    exactly one more covering the latest scene, instead of either dropping the edit or queuing one call per
+    pointer-move. */
+let interactiveSimulationSceneChangedSinceStart = false;
+/** How often the live playback graph is actually allowed to pick up a freshly simulated impulse response — a
+    touch longer than `SimpleAudioPlaybackController`'s own crossfade, so consecutive swaps during a fast drag
+    each get a clean crossfade instead of piling several half-faded voices on top of one another. This only
+    throttles how often the *latest* result reaches the speakers; the interactive-preview ray tracing itself
+    (`triggerInteractivePreview`) still runs as fast as it can. */
+const LIVE_PLAYBACK_UPDATE_MIN_INTERVAL_MILLISECONDS = 120;
+let lastLivePlaybackUpdateAtMilliseconds = 0;
+let pendingLivePlaybackUpdateTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
 function currentScene(): RoomScene {
   return { boxes: roomBoxes.value, source: sourcePosition.value, listener: listenerPosition.value };
 }
 
+/** Runs a fast, rough `INTERACTIVE_RAY_TRACING_PARAMS` pass immediately on every edit — this, not the
+    debounced full-quality pass below, is what makes dragging a box or the listener update the sound live
+    instead of only after the drag stops. Self-throttling: a drag firing this many times per second still only
+    ever has one interactive simulation in flight, always covering whatever the scene looked like most
+    recently rather than working through a backlog of stale ones. */
+function triggerInteractivePreview(): void {
+  if (interactiveSimulationInFlight) {
+    interactiveSimulationSceneChangedSinceStart = true;
+    return;
+  }
+
+  interactiveSimulationInFlight = true;
+  interactiveSimulationSceneChangedSinceStart = false;
+  void runSimulation('interactive').finally(() => {
+    interactiveSimulationInFlight = false;
+    if (interactiveSimulationSceneChangedSinceStart) triggerInteractivePreview();
+  });
+}
+
 function scheduleResimulate(): void {
+  triggerInteractivePreview();
+
   if (resimulateTimeoutId !== null) clearTimeout(resimulateTimeoutId);
   resimulateTimeoutId = setTimeout(() => {
     resimulateTimeoutId = null;
-    void runSimulationAndConvolve();
+    void runSimulation('full');
   }, RESIMULATE_DEBOUNCE_MILLISECONDS);
+}
+
+/** If an edit's debounced full-quality resimulation hasn't fired yet, runs it immediately and waits for it —
+    so an export started right after an edit renders that edit's room at full quality, not whatever interactive
+    preview happened to be latest when Download was clicked. Doesn't wait for an already-in-flight simulation
+    (ray tracing is fast enough, and bounded by `MAXIMUM_BOUNCES`/`NUMBER_OF_RAYS`, that this window is
+    negligible), only a pending one. */
+async function flushPendingResimulate(): Promise<void> {
+  if (resimulateTimeoutId === null) return;
+  clearTimeout(resimulateTimeoutId);
+  resimulateTimeoutId = null;
+  await runSimulation('full');
 }
 
 /** Reuses the same controller (and its `AudioContext`) across every resimulation instead of tearing one down
     and spinning up a new one — recreating a real-time `AudioContext` on every room edit was the main source of
     the "very laggy editing" feel, since setting up an actual audio output stream is comparatively expensive
-    and was happening on every debounced edit rather than only when it was actually needed. */
-function startPlaybackFromWetAudio(): void {
+    and was happening on every debounced edit rather than only when it was actually needed.
+    Plays the dry audio through a live `ConvolverNode` fed the just-simulated impulse response, rather than
+    waiting for `convolveWithImpulseResponse.ts` to render the whole file offline first — listening can start
+    (or keep going, through a room edit) the instant ray tracing finishes, however long the dry file is. The
+    full offline render is reserved for `exportReverbAudio`, where exact rendered samples are actually needed. */
+function startLivePlaybackFromLatestSimulation(): void {
   const wasPlaying = isPlaybackPlaying.value;
   const resumeFromSeconds = playbackCurrentTimeSeconds.value;
-  const audioBuffer = buildAudioBufferFromChannels(wetChannelData, wetSampleRate);
+  const dryAudioBuffer = buildAudioBufferFromChannels(dryChannelData, drySampleRate);
+  // Blended with whatever was live before, not the raw latest simulation directly — see
+  // `liveImpulseResponseChannelData`'s comment.
+  liveImpulseResponseChannelData = blendImpulseResponses(liveImpulseResponseChannelData, latestImpulseResponseChannelData);
+  const impulseResponseAudioBuffer = buildAudioBufferFromChannels(liveImpulseResponseChannelData, drySampleRate);
 
   if (activePlaybackController) {
-    activePlaybackController.setBuffer(audioBuffer);
+    activePlaybackController.setBuffers(dryAudioBuffer, impulseResponseAudioBuffer);
   } else {
-    const controller = new SimpleAudioPlaybackController(audioBuffer);
+    const controller = new SimpleAudioPlaybackController(dryAudioBuffer, impulseResponseAudioBuffer);
     controller.onTimeUpdate = seconds => {
       playbackCurrentTimeSeconds.value = seconds;
     };
@@ -99,38 +176,67 @@ function startPlaybackFromWetAudio(): void {
     };
     activePlaybackController = controller;
   }
-  playbackDurationSeconds.value = audioBuffer.duration;
+  playbackDurationSeconds.value = activePlaybackController.durationSeconds;
 
   // Mirrors PreviewPlaybackController's behavior on a config change: if the user was already listening, an
   // edit updates what they hear in place rather than silently stopping playback.
-  if (wasPlaying) activePlaybackController.play(Math.min(resumeFromSeconds, audioBuffer.duration));
+  if (wasPlaying) activePlaybackController.play(Math.min(resumeFromSeconds, activePlaybackController.durationSeconds));
 }
 
-async function runSimulationAndConvolve(): Promise<void> {
+/** Throttled entry point for `startLivePlaybackFromLatestSimulation` — see
+    `LIVE_PLAYBACK_UPDATE_MIN_INTERVAL_MILLISECONDS`. If called again before the interval has elapsed, doesn't
+    queue a second call on top of an already-queued one: the trailing call always reads
+    `latestImpulseResponseChannelData` at the moment it actually fires, so it picks up whatever's freshest
+    regardless of how many updates arrived in between. */
+function scheduleLivePlaybackUpdate(): void {
+  const now = performance.now();
+  const elapsedSinceLastUpdate = now - lastLivePlaybackUpdateAtMilliseconds;
+
+  if (elapsedSinceLastUpdate >= LIVE_PLAYBACK_UPDATE_MIN_INTERVAL_MILLISECONDS) {
+    lastLivePlaybackUpdateAtMilliseconds = now;
+    startLivePlaybackFromLatestSimulation();
+    return;
+  }
+
+  if (pendingLivePlaybackUpdateTimeoutId !== null) return;
+  pendingLivePlaybackUpdateTimeoutId = setTimeout(
+    () => {
+      pendingLivePlaybackUpdateTimeoutId = null;
+      lastLivePlaybackUpdateAtMilliseconds = performance.now();
+      startLivePlaybackFromLatestSimulation();
+    },
+    LIVE_PLAYBACK_UPDATE_MIN_INTERVAL_MILLISECONDS - elapsedSinceLastUpdate,
+  );
+}
+
+/** `quality: 'interactive'` runs a fast, rough preview pass and only ever updates what's audible — it never
+    touches `isSimulatingReverb`/`hasCompletedSimulation`/`reverbErrorMessage`, so the "Simulating…"/"Simulated"
+    status line reflects the accurate full-quality pass, not the many quick previews a drag fires per second.
+    A failed interactive pass fails silently for the same reason: the debounced full pass that follows it will
+    surface a real error if the room genuinely can't be simulated. */
+async function runSimulation(quality: SimulationQuality): Promise<void> {
   if (dryChannelData.length === 0 || drySampleRate === 0) return;
 
   const requestToken = ++resimulateRequestToken;
-  isSimulatingReverb.value = true;
-  reverbErrorMessage.value = null;
+  if (quality === 'full') {
+    isSimulatingReverb.value = true;
+    reverbErrorMessage.value = null;
+  }
 
   try {
     if (!activeWorkerClient) activeWorkerClient = new RoomAcousticsWorkerClient();
-    const { impulseResponseChannelData } = await activeWorkerClient.simulate(currentScene(), drySampleRate);
+    const { impulseResponseChannelData } = await activeWorkerClient.simulate(currentScene(), drySampleRate, stereoSimulationEnabled.value, quality);
     if (requestToken !== resimulateRequestToken) return;
 
-    const { channelData, sampleRate } = await convolveWithImpulseResponse(dryChannelData, drySampleRate, impulseResponseChannelData);
-    if (requestToken !== resimulateRequestToken) return;
-
-    wetChannelData = channelData;
-    wetSampleRate = sampleRate;
-    startPlaybackFromWetAudio();
-    hasCompletedSimulation.value = true;
+    latestImpulseResponseChannelData = impulseResponseChannelData;
+    scheduleLivePlaybackUpdate();
+    if (quality === 'full') hasCompletedSimulation.value = true;
   } catch (caughtError) {
-    if (requestToken === resimulateRequestToken) {
+    if (quality === 'full' && requestToken === resimulateRequestToken) {
       reverbErrorMessage.value = caughtError instanceof Error ? caughtError.message : 'Could not simulate this room.';
     }
   } finally {
-    if (requestToken === resimulateRequestToken) isSimulatingReverb.value = false;
+    if (quality === 'full' && requestToken === resimulateRequestToken) isSimulatingReverb.value = false;
   }
 }
 
@@ -141,18 +247,21 @@ export async function loadDryAudioFile(file: File): Promise<void> {
   isSimulatingReverb.value = true;
   hasCompletedSimulation.value = false;
   // Paused (not disposed) — the controller and its AudioContext are reused for whatever the new file's
-  // simulation produces, via `startPlaybackFromWetAudio`'s `setBuffer`.
+  // simulation produces, via `startLivePlaybackFromLatestSimulation`'s `setBuffers`.
   activePlaybackController?.pause();
   isPlaybackPlaying.value = false;
   playbackCurrentTimeSeconds.value = 0;
   playbackDurationSeconds.value = 0;
+  // Otherwise a new file that happens to share the previous one's sample rate would start out blending its
+  // very first simulation with a leftover impulse response from a completely different dry file/room session.
+  liveImpulseResponseChannelData = [];
 
   try {
     const decoded = await decodeAudioFile(file);
     dryChannelData = decoded.channelData;
     drySampleRate = decoded.sampleRate;
     uploadedAudioFileName.value = file.name;
-    await runSimulationAndConvolve();
+    await runSimulation('full');
   } catch (caughtError) {
     reverbErrorMessage.value = caughtError instanceof Error ? caughtError.message : 'Could not read this audio file.';
     uploadedAudioFileName.value = null;
@@ -231,6 +340,11 @@ export function toggleSnapToAlignment(): void {
   snapToAlignmentEnabled.value = !snapToAlignmentEnabled.value;
 }
 
+export function toggleStereoSimulation(): void {
+  stereoSimulationEnabled.value = !stereoSimulationEnabled.value;
+  scheduleResimulate();
+}
+
 export function updateSelectedBoxesAbsorptionBand(band: 'low' | 'mid' | 'high', value: number): void {
   updateSelectedBoxes(box => ({ ...box, absorption: { ...box.absorption, [band]: value } }));
 }
@@ -282,14 +396,22 @@ export function setExportFormat(format: ExportAudioFormat): void {
   exportFormat.value = format;
 }
 
+/** Renders the complete dry file against the current room's impulse response via `convolveWithImpulseResponse.ts`'s
+    `OfflineAudioContext` — full length, full precision — rather than reusing whatever live preview happens to
+    have played through its `ConvolverNode` so far. Live preview only ever plays; it never produces an actual
+    rendered sample buffer, so this is the one place that does. */
 export async function exportReverbAudio(): Promise<void> {
   const fileName = uploadedAudioFileName.value;
-  if (!fileName || wetChannelData.length === 0) return;
+  if (!fileName || dryChannelData.length === 0) return;
 
   isExportingAudio.value = true;
   reverbErrorMessage.value = null;
   try {
-    const blob = exportFormat.value === 'mp3' ? await encodeMp3(wetChannelData, wetSampleRate) : encodeWav(wetChannelData, wetSampleRate);
+    await flushPendingResimulate();
+    if (latestImpulseResponseChannelData.length === 0) return;
+
+    const { channelData, sampleRate } = await convolveWithImpulseResponse(dryChannelData, drySampleRate, latestImpulseResponseChannelData);
+    const blob = exportFormat.value === 'mp3' ? await encodeMp3(channelData, sampleRate) : encodeWav(channelData, sampleRate);
     downloadBlob(blob, deriveReverbExportFileName(fileName, exportFormat.value));
   } catch (caughtError) {
     reverbErrorMessage.value = caughtError instanceof Error ? caughtError.message : 'Could not export this audio file.';

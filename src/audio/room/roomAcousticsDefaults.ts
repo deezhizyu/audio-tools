@@ -12,6 +12,18 @@ export const NUMBER_OF_RAYS = 2048;
 export const MAXIMUM_BOUNCES = 60;
 export const MINIMUM_ENERGY_THRESHOLD = 1e-4;
 
+/** A much smaller ray/bounce budget used only while the room is actively being edited (see
+    `INTERACTIVE_RAY_TRACING_PARAMS` in `traceRays.ts`) — tracing is ~85-90% of a simulation's total time
+    (histogram/synthesis/discrete-tap rendering are already cheap by comparison, tens of milliseconds even at
+    the full budget), so this is where the time actually needs to come from to make dragging a box or the
+    listener feel live instead of laggy. Benchmarked at roughly 35-55ms even for a busy (15-box) room, against
+    300ms-1s+ for `NUMBER_OF_RAYS`/`MAXIMUM_BOUNCES` on the same scenes — a noticeably sparser, rougher-sounding
+    reflection pattern, but one that updates fast enough to track a drag in real time. Once the room settles
+    (`RESIMULATE_DEBOUNCE_MILLISECONDS` after the last edit in `roomReverbSignals.ts`), the full-budget pass
+    replaces it with the accurate result. */
+export const INTERACTIVE_NUMBER_OF_RAYS = 256;
+export const INTERACTIVE_MAXIMUM_BOUNCES = 20;
+
 export const HISTOGRAM_BIN_DURATION_SECONDS = 0.005;
 export const MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS = 3;
 

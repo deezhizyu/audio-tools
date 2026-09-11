@@ -19,8 +19,17 @@ import { traceRays, type RayTracingParams } from './traceRays';
  * — matching how Steam Audio's own reflections engine turns traced energy into audio there. The direct,
  * unreflected path is always a true single impulse (it's a single deterministic straight line, not a Monte
  * Carlo sample), handled separately by `directSound.ts`.
+ *
+ * `stereoSimulationEnabled` controls whether the direct sound, discrete first-bounce taps, and diffuse tail
+ * are panned left/right by direction (Steam Audio's constant-power stereo pan law — see `stereoPanning.ts`)
+ * or left centered on both channels, as they were before this option existed.
  */
-export function synthesizeRoomImpulseResponse(scene: RoomScene, sampleRate: number, rayTracingParams: RayTracingParams): Float32Array<ArrayBuffer>[] {
+export function synthesizeRoomImpulseResponse(
+  scene: RoomScene,
+  sampleRate: number,
+  rayTracingParams: RayTracingParams,
+  stereoSimulationEnabled: boolean,
+): Float32Array<ArrayBuffer>[] {
   const arrivals = traceRays(scene, rayTracingParams);
   const firstBounceArrivals = arrivals.filter(arrival => arrival.bounceOrder === 0);
   const laterBounceArrivals = arrivals.filter(arrival => arrival.bounceOrder > 0);
@@ -37,10 +46,18 @@ export function synthesizeRoomImpulseResponse(scene: RoomScene, sampleRate: numb
     sampleRate,
     directSound,
     rayTracingParams.speedOfSoundMetersPerSecond,
+    stereoSimulationEnabled,
     rayTracingParams.randomSource,
   );
 
-  renderDiscreteReflectionTaps(channels, firstBounceArrivals, sampleRate, rayTracingParams.numberOfRays, rayTracingParams.randomSource);
+  renderDiscreteReflectionTaps(
+    channels,
+    firstBounceArrivals,
+    sampleRate,
+    rayTracingParams.numberOfRays,
+    stereoSimulationEnabled,
+    rayTracingParams.randomSource,
+  );
 
   return channels;
 }

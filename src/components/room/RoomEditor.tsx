@@ -17,8 +17,10 @@ import {
   setActiveRoomEditorTool,
   snapToAlignmentEnabled,
   sourcePosition,
+  stereoSimulationEnabled,
   toggleBoxSelection,
   toggleSnapToAlignment,
+  toggleStereoSimulation,
   updateSelectedBoxesAbsorptionBand,
   updateSelectedBoxesMaterial,
   updateSelectedBoxesTextureIntensity,
@@ -308,6 +310,9 @@ export function RoomEditor() {
           <div class="mx-1 h-6 w-px bg-border-subtle" />
           <Button variant={snapToAlignmentEnabled.value ? 'primary' : 'secondary'} onClick={toggleSnapToAlignment}>
             Snap {snapToAlignmentEnabled.value ? 'on' : 'off'}
+          </Button>
+          <Button variant={stereoSimulationEnabled.value ? 'primary' : 'secondary'} onClick={toggleStereoSimulation}>
+            Stereo sim {stereoSimulationEnabled.value ? 'on' : 'off'}
           </Button>
         </div>
       </div>
