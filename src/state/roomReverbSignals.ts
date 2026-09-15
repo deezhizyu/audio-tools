@@ -15,6 +15,7 @@ import {
   type ResizeHandle,
 } from '../audio/room/roomEditorGeometry';
 import { parseRoomScene, serializeRoomScene } from '../audio/room/roomFileFormat';
+import { DEFAULT_ROOM_PRESET_ID, getRoomPreset, type RoomPresetId } from '../audio/room/roomPresets';
 import { DEFAULT_ABSORBER_MATERIAL_ID, DEFAULT_OBJECT_MATERIAL_ID, getRoomMaterial } from '../audio/room/roomMaterials';
 import type { ListenerMode, RoomBox, RoomBoxKind, RoomListener, RoomMaterialId, RoomSource, RoomScene } from '../audio/room/roomTypes';
 import {
@@ -22,7 +23,6 @@ import {
   MAXIMUM_DIRECTIVITY_WEIGHT,
   MINIMUM_DIRECTIVITY_SHARPNESS,
   MINIMUM_DIRECTIVITY_WEIGHT,
-  OMNIDIRECTIONAL_DIRECTIVITY,
 } from '../audio/room/sourceDirectivity';
 import { SimpleAudioPlaybackController } from '../audio/SimpleAudioPlaybackController';
 import type { ExportAudioFormat } from '../audio/types';
@@ -41,9 +41,14 @@ const RESIMULATE_DEBOUNCE_MILLISECONDS = 250;
 // --- Room geometry signals — independent of the loaded audio file, so nothing that touches audio ever needs
 //     to (and never does) reset these. -------------------------------------------------------------------
 
-export const roomBoxes = signal<RoomBox[]>([]);
-export const roomSource = signal<RoomSource>({ x: -2, y: 1.5, z: 0, yawDegrees: 0, directivity: OMNIDIRECTIONAL_DIRECTIVITY });
-export const roomListener = signal<RoomListener>({ x: 2, y: 1.5, z: 0, yawDegrees: 180, mode: 'binaural' });
+/** The app opens on a real room rather than an empty void, so the first thing anyone hears after loading a
+    file is a room, and the editor has something to look at and take apart. */
+const initialScene = getRoomPreset(DEFAULT_ROOM_PRESET_ID).buildScene();
+
+export const roomBoxes = signal<RoomBox[]>(initialScene.boxes);
+export const roomSource = signal<RoomSource>(initialScene.source);
+export const roomListener = signal<RoomListener>(initialScene.listener);
+export const activeRoomPresetId = signal<RoomPresetId | null>(DEFAULT_ROOM_PRESET_ID);
 export const selectedBoxIds = signal<ReadonlySet<string>>(new Set());
 export const activeRoomEditorTool = signal<RoomEditorTool>('select');
 /** Whether dragging a box/source/listener snaps to nearby object edges, their centers, and the origin axes
@@ -276,6 +281,21 @@ export async function loadDryAudioFile(file: File): Promise<void> {
 
 function updateBoxes(updater: (boxes: RoomBox[]) => RoomBox[]): void {
   roomBoxes.value = updater(roomBoxes.value);
+  // Any edit means the room is no longer the preset it started from, so the picker stops claiming it is.
+  activeRoomPresetId.value = null;
+  scheduleResimulate();
+}
+
+/** Replaces the whole scene — geometry, source and listener alike — with a preset's. Deliberately does not
+    touch the loaded audio, mirroring how importing a room file works. */
+export function applyRoomPreset(presetId: RoomPresetId): void {
+  const scene = getRoomPreset(presetId).buildScene();
+  roomBoxes.value = scene.boxes;
+  roomSource.value = scene.source;
+  roomListener.value = scene.listener;
+  selectedBoxIds.value = new Set();
+  activeRoomPresetId.value = presetId;
+  reverbErrorMessage.value = null;
   scheduleResimulate();
 }
 
@@ -483,6 +503,7 @@ export async function importRoomFromFile(file: File): Promise<void> {
     roomSource.value = scene.source;
     roomListener.value = scene.listener;
     selectedBoxIds.value = new Set();
+    activeRoomPresetId.value = null;
     reverbErrorMessage.value = null;
     scheduleResimulate();
   } catch (caughtError) {

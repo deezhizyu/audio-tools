@@ -1,8 +1,11 @@
 import type { ComponentChildren, JSX } from 'preact';
 import { getRoomMaterialsInGroup, type RoomMaterialGroup } from '../../audio/room/roomMaterials';
 import type { RoomBox, RoomMaterialId } from '../../audio/room/roomTypes';
+import { ROOM_PRESETS, type RoomPresetId } from '../../audio/room/roomPresets';
 import {
   activeRoomEditorTool,
+  activeRoomPresetId,
+  applyRoomPreset,
   createBoxFromCanvasDrag,
   moveListenerOnAxes,
   moveSelectedBoxes,
@@ -302,6 +305,40 @@ function SelectedBoxInspector() {
   return <MultiBoxInspector boxes={selected} />;
 }
 
+/** Starting points rather than fixtures: applying one replaces the whole scene, and the very next edit
+    detaches from it (`activeRoomPresetId` goes null), because a preset that has been rearranged is no longer
+    that preset. */
+function PresetPicker() {
+  const handleChange = (event: JSX.TargetedEvent<HTMLSelectElement>) => {
+    if (event.currentTarget.value) applyRoomPreset(event.currentTarget.value as RoomPresetId);
+  };
+
+  const activeId = activeRoomPresetId.value;
+  const activePreset = ROOM_PRESETS.find(preset => preset.id === activeId);
+
+  return (
+    <div class="flex flex-col gap-1">
+      <select
+        value={activeId ?? ''}
+        onChange={handleChange}
+        class="rounded-md border border-border-strong bg-surface-overlay px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent"
+      >
+        {activeId === null && (
+          <option value="" disabled>
+            Start from a preset…
+          </option>
+        )}
+        {ROOM_PRESETS.map(preset => (
+          <option key={preset.id} value={preset.id}>
+            {preset.label}
+          </option>
+        ))}
+      </select>
+      {activePreset && <span class="max-w-64 text-[10px] leading-snug text-text-tertiary">{activePreset.description}</span>}
+    </div>
+  );
+}
+
 /** Two mutually exclusive choices shown as a pair of buttons — used for the source's radiation pattern and
     the listener's hearing, which are both genuinely binary and both worth showing rather than hiding behind a
     dropdown. */
@@ -438,7 +475,9 @@ export function RoomEditor() {
             </>
           }
         />
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="flex flex-wrap items-start gap-2">
+          <PresetPicker />
+          <div class="mx-1 h-6 w-px bg-border-subtle" />
           {TOOL_OPTIONS.map(({ tool, label }) => (
             <Button key={tool} variant={activeTool === tool ? 'primary' : 'secondary'} onClick={() => setActiveRoomEditorTool(tool)}>
               {label}
