@@ -1,10 +1,15 @@
 import { describe, expect, test } from 'vitest';
 import { computeDirectSoundArrival } from './directSound';
 import { estimateReverberationTimeSeconds } from './estimateReverbTime';
-import { SPEED_OF_SOUND_METERS_PER_SECOND } from './roomAcousticsDefaults';
+import { computeImageSourceArrivals } from './imageSources';
+import { MAXIMUM_IMAGE_SOURCE_ORDER, SPEED_OF_SOUND_METERS_PER_SECOND } from './roomAcousticsDefaults';
 import { DEFAULT_ROOM_PRESET_ID, getRoomPreset, ROOM_PRESETS, type RoomPresetId } from './roomPresets';
 import { synthesizeRoomImpulseResponse } from './synthesizeRoomImpulseResponse';
 import { DEFAULT_RAY_TRACING_PARAMS } from './traceRays';
+
+function totalBandEnergy(energy: { low: number; mid: number; high: number }): number {
+  return energy.low + energy.mid + energy.high;
+}
 
 const SAMPLE_RATE = 16000;
 
@@ -132,5 +137,27 @@ describe('preset acoustics', () => {
   test('an indoor room is far more reverberant than either outdoor scene', () => {
     expect(directToReverberantDecibels('empty-small-room')).toBeLessThan(directToReverberantDecibels('outdoor-street'));
     expect(directToReverberantDecibels('furnished-small-room')).toBeLessThan(directToReverberantDecibels('outdoor-street'));
+  });
+
+  test("the grass field's ground bounce scatters instead of arriving as a clean mirror slap", () => {
+    // Grass has no coherent flat plane to speak of at audio wavelengths, so its one specular echo — the
+    // direct sound's mirror image in the ground — should be a distinctly minor part of what reaches the
+    // listener, not a strong, clean second copy of the direct sound. That balance is what `scatterAmount`
+    // governs (see `faceSpecularReflectance`): too low, and grass reflects like a hard floor.
+    const scene = getRoomPreset('outdoor-grass-field').buildScene();
+    const direct = computeDirectSoundArrival(scene, SPEED_OF_SOUND_METERS_PER_SECOND);
+    const [groundBounce] = computeImageSourceArrivals(scene, MAXIMUM_IMAGE_SOURCE_ORDER, SPEED_OF_SOUND_METERS_PER_SECOND, DEFAULT_RAY_TRACING_PARAMS.maximumDistanceMeters);
+
+    expect(groundBounce).toBeDefined();
+    expect(totalBandEnergy(groundBounce.energy) / totalBandEnergy(direct.energy)).toBeLessThan(0.1);
+  });
+
+  test('the street disperses instead of ringing like an enclosed corridor', () => {
+    // Two long, closely-spaced, nearly-specular façades trap sound in a flutter echo that bounces between
+    // them dozens of times before escaping — measured, before the façades were widened and given a rough,
+    // scattering material, at a 2-second decay indistinguishable from an indoor corridor. An open street
+    // should shed most of its energy within a few hundred milliseconds of the direct sound, whatever's left
+    // of it going out the ends and over the rooftops rather than sustaining a decay.
+    expect(reverberationTimeOf('outdoor-street')!).toBeLessThan(1.2);
   });
 });

@@ -196,8 +196,14 @@ function buildEmptyLargeRoom(): RoomScene {
   };
 }
 
-const STREET_WIDTH_METERS = 11;
-const STREET_LENGTH_METERS = 50;
+/** Wide enough for two lanes and sidewalks — and, just as importantly for the tracer, wide enough that the
+    round trip between the two façades (2 × this ÷ speed of sound) is long compared to how fast each bounce
+    loses energy, so reflections thin out into a handful of audible slaps rather than a dense, rapid flutter. */
+const STREET_WIDTH_METERS = 16;
+/** Roughly one city block. The previous 50m made the canyon nearly as long as it was wide, so a ray
+    bouncing straight across it could ping-pong dozens of times before ever reaching an open end — a shorter
+    block gives sound an escape route sooner. */
+const STREET_LENGTH_METERS = 26;
 const FACADE_HEIGHT_METERS = 13;
 
 /**
@@ -205,10 +211,16 @@ const FACADE_HEIGHT_METERS = 13;
  * most of the sound leaves for good and what comes back is a handful of strong lateral reflections between
  * the buildings rather than a decaying tail — the slap-back that makes a street sound like a street and
  * nothing like a room of the same width.
+ *
+ * The façades themselves are `building-facade`, not `bare-brick`: a real front is broken up by window
+ * reveals, balconies, sills and cornices, all scattering an incident reflection far more than bare masonry
+ * alone would. Two long, closely-spaced, nearly-specular walls (`bare-brick` used to be here) behave as a
+ * flutter-echo waveguide — measured at a 2-second decay, indistinguishable from an indoor corridor — because
+ * a near-mirror reflection just keeps bouncing between them instead of dispersing.
  */
 function buildOutdoorStreet(): RoomScene {
   const facadeAt = (id: string, z: number): RoomBox[] => [
-    buildPresetBox(`${id}-wall`, 'bare-brick', {
+    buildPresetBox(`${id}-wall`, 'building-facade', {
       x: -STREET_LENGTH_METERS / 2,
       y: 0,
       z,

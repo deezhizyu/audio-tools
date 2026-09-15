@@ -68,6 +68,19 @@ const ROOM_MATERIAL_DEFINITIONS: Record<RoomMaterialId, Omit<RoomMaterial, 'id'>
   glass: { label: 'Glass, window pane', group: 'hard', absorption: { low: 0.26, mid: 0.08, high: 0.04 }, scatterAmount: 0.04, color: '#a8d4e0' },
   'plate-glass': { label: 'Glass, heavy plate', group: 'hard', absorption: { low: 0.09, mid: 0.03, high: 0.02 }, scatterAmount: 0.03, color: '#7fb6c7' },
   'gypsum-board': { label: 'Drywall / gypsum board', group: 'hard', absorption: { low: 0.12, mid: 0.06, high: 0.04 }, scatterAmount: 0.08, color: '#e5e1d8' },
+  /** A real building front is never one flat plane the way a painted interior wall is — window reveals,
+      balconies, sills, cornices and pipework are all irregularities at the scale of audio wavelengths, and
+      they scatter far more of an incident reflection than the bare masonry number alone suggests. Modeling a
+      street's façades as `bare-brick` (scatter 0.2, nearly a mirror) is what turned two long, closely-spaced
+      building fronts into a flutter-echo waveguide — a corridor, not a street — because a near-specular
+      reflection bounces back and forth between them dozens of times before enough of it escapes. */
+  'building-facade': {
+    label: 'Building façade (masonry, windows, balconies)',
+    group: 'hard',
+    absorption: { low: 0.04, mid: 0.06, high: 0.08 },
+    scatterAmount: 0.45,
+    color: '#9c7a5c',
+  },
 
   // --- Soft surfaces and furnishings -----------------------------------------------------------------
   'generic-absorber': { label: 'Generic absorptive material', group: 'soft', absorption: DEFAULT_ABSORBER_ABSORPTION, scatterAmount: SCATTER_AMOUNT, color: '#ef4444' },
@@ -91,13 +104,19 @@ const ROOM_MATERIAL_DEFINITIONS: Record<RoomMaterialId, Omit<RoomMaterial, 'id'>
   // --- Ground and outdoor surfaces -------------------------------------------------------------------
   /** Grass is close to a total absorber above a few hundred hertz — 0.6 at 500Hz rising past 0.95 by 4kHz.
       Values far below that (this entry used to read 0.11/0.30/0.60) describe something closer to a hard
-      field, and are why an outdoor scene came back sounding enclosed instead of open. */
-  grass: { label: 'Grass', group: 'ground', absorption: { low: 0.3, mid: 0.85, high: 0.95 }, scatterAmount: 0.45, color: '#4a7c3f' },
-  soil: { label: 'Bare soil / packed earth', group: 'ground', absorption: { low: 0.15, mid: 0.4, high: 0.55 }, scatterAmount: 0.35, color: '#6b5138' },
-  gravel: { label: 'Gravel', group: 'ground', absorption: { low: 0.6, mid: 0.7, high: 0.8 }, scatterAmount: 0.45, color: '#8a857c' },
+      field, and are why an outdoor scene came back sounding enclosed instead of open.
+      Its `scatterAmount` needs to be high, not moderate: individual blades are a fraction of even the
+      shortest audible wavelength, so grass has no coherent flat plane to mirror-reflect off at all — it is
+      one of the closest things to a purely Lambertian (fully diffuse) surface in this catalog. Treating it
+      as half-specular (this used to read 0.45) gave a field's single ground bounce an unrealistically clean,
+      focused echo — a "slap" no real lawn produces — instead of the soft, spread-out scatter a real one
+      does. */
+  grass: { label: 'Grass', group: 'ground', absorption: { low: 0.3, mid: 0.85, high: 0.95 }, scatterAmount: 0.85, color: '#4a7c3f' },
+  soil: { label: 'Bare soil / packed earth', group: 'ground', absorption: { low: 0.15, mid: 0.4, high: 0.55 }, scatterAmount: 0.55, color: '#6b5138' },
+  gravel: { label: 'Gravel', group: 'ground', absorption: { low: 0.6, mid: 0.7, high: 0.8 }, scatterAmount: 0.65, color: '#8a857c' },
   asphalt: { label: 'Asphalt / paving', group: 'ground', absorption: { low: 0.03, mid: 0.04, high: 0.05 }, scatterAmount: 0.1, color: '#4a4a4e' },
   water: { label: 'Water surface', group: 'ground', absorption: { low: 0.01, mid: 0.01, high: 0.02 }, scatterAmount: 0.02, color: '#3f6f9c' },
-  snow: { label: 'Fresh snow', group: 'ground', absorption: { low: 0.7, mid: 0.95, high: 0.95 }, scatterAmount: 0.5, color: '#eaf1f6' },
+  snow: { label: 'Fresh snow', group: 'ground', absorption: { low: 0.7, mid: 0.95, high: 0.95 }, scatterAmount: 0.7, color: '#eaf1f6' },
   foliage: { label: 'Dense foliage / hedge', group: 'ground', absorption: { low: 0.2, mid: 0.5, high: 0.7 }, scatterAmount: 0.75, color: '#2f6b35' },
 };
 

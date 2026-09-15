@@ -29,6 +29,7 @@ export type RoomMaterialId =
   | 'glass'
   | 'plate-glass'
   | 'gypsum-board'
+  | 'building-facade'
   // Soft, absorptive surfaces and furnishings
   | 'generic-absorber'
   | 'wool'
