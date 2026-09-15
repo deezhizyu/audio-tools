@@ -15,7 +15,7 @@ import {
   type Rect2D,
   type ResizeHandle,
 } from '../../audio/room/roomEditorGeometry';
-import type { RoomBox, RoomPoint3D } from '../../audio/room/roomTypes';
+import type { RoomBox, RoomListener, RoomSource } from '../../audio/room/roomTypes';
 import { metersToCentimeters } from '../../utils/unitConversion';
 import {
   DEFAULT_VIEW_TRANSFORM,
@@ -23,6 +23,8 @@ import {
   panViewTransform,
   pixelToWorld,
   pixelsPerMeter,
+  rotationHandlePixelOffset,
+  ROTATION_HANDLE_RADIUS_PIXELS,
   worldToPixel,
   zoomViewTransform,
   type RoomViewTheme,
@@ -38,8 +40,8 @@ interface RoomOrthographicViewProps {
   verticalAxisLabel: string;
   boxes: RoomBox[];
   selectedBoxIds: ReadonlySet<string>;
-  source: RoomPoint3D;
-  listener: RoomPoint3D;
+  source: RoomSource;
+  listener: RoomListener;
   activeTool: RoomEditorTool;
   snapEnabled: boolean;
   onSelectBox: (boxId: string | null) => void;
@@ -50,6 +52,8 @@ interface RoomOrthographicViewProps {
   onCreateBox: (startPoint: Point2D, endPoint: Point2D) => void;
   onMoveSource: (point: Point2D) => void;
   onMoveListener: (point: Point2D) => void;
+  onRotateSource: (yawDegrees: number) => void;
+  onRotateListener: (yawDegrees: number) => void;
 }
 
 const VIEW_HEIGHT_PIXELS = 260;
@@ -68,6 +72,9 @@ const CLICK_VS_DRAG_THRESHOLD_PIXELS = 4;
     axis — before it snaps to it. Deliberately a bit larger than the click-vs-drag threshold: snapping is meant
     to be easy to land on without fighting the cursor. */
 const SNAP_THRESHOLD_PIXELS = 8;
+/** What a rotation drag snaps to when snapping is on — the angles people actually reach for (straight on,
+    square to a wall, the diagonals in between) rather than an arbitrary fraction of a turn. */
+const ROTATION_SNAP_DEGREES = 15;
 
 type DragMode =
   | { kind: 'pan'; lastPixelPoint: Point2D }
@@ -96,6 +103,8 @@ type DragMode =
       startPixelPoint: Point2D;
       hasCrossedClickThreshold: boolean;
     }
+  | { kind: 'rotate-source' }
+  | { kind: 'rotate-listener' }
   | { kind: 'resize-box'; boxId: string; handle: ResizeHandle }
   | { kind: 'create-box'; startWorldPoint: Point2D }
   | { kind: 'marquee'; startWorldPoint: Point2D };
@@ -224,6 +233,8 @@ export function RoomOrthographicView({
   onCreateBox,
   onMoveSource,
   onMoveListener,
+  onRotateSource,
+  onRotateListener,
 }: RoomOrthographicViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -322,6 +333,47 @@ export function RoomOrthographicView({
     return pixelToWorld(pixel, widthPixels, VIEW_HEIGHT_PIXELS, transform);
   };
 
+  /** Which view this is decides whether a rotation handle is draggable at all. Yaw is an angle in the
+      horizontal plane, and only the top view shows that plane face-on — in the front and side views the
+      pointer's position constrains just one of the angle's two components, so dragging it there could only
+      guess. Those views still draw the facing direction, foreshortened; the inspector's degree field is how
+      it gets edited from anywhere. */
+  const supportsRotation = axes.horizontal === 'x' && axes.vertical === 'z';
+
+  const markerPixelPoint = (marker: RoomSource | RoomListener): Point2D =>
+    worldToPixel(
+      { horizontal: marker[axes.horizontal], vertical: marker[axes.vertical] },
+      containerRef.current?.clientWidth ?? 1,
+      VIEW_HEIGHT_PIXELS,
+      transform,
+    );
+
+  const findRotationHandleUnderPoint = (pixelPoint: Point2D): 'source' | 'listener' | null => {
+    if (!supportsRotation) return null;
+
+    // The listener is tested first for the same reason it is drawn last: when the two markers overlap, the
+    // one on top is the one the pointer should find.
+    const candidates: { marker: RoomSource | RoomListener; name: 'source' | 'listener'; hasHandle: boolean }[] = [
+      { marker: listener, name: 'listener', hasHandle: listener.mode !== 'mono' },
+      { marker: source, name: 'source', hasHandle: source.directivity.enabled },
+    ];
+
+    for (const { marker, name, hasHandle } of candidates) {
+      if (!hasHandle) continue;
+      const offset = rotationHandlePixelOffset(marker.yawDegrees, axes);
+      if (!offset) continue;
+      const center = markerPixelPoint(marker);
+      const handle = { horizontal: center.horizontal + offset.horizontal, vertical: center.vertical + offset.vertical };
+      if (pixelDistance(pixelPoint, handle) <= ROTATION_HANDLE_RADIUS_PIXELS + 3) return name;
+    }
+    return null;
+  };
+
+  const yawFromPointer = (marker: RoomSource | RoomListener, point: Point2D): number => {
+    const yawDegrees = (Math.atan2(point.vertical - marker[axes.vertical], point.horizontal - marker[axes.horizontal]) * 180) / Math.PI;
+    return snapEnabled ? Math.round(yawDegrees / ROTATION_SNAP_DEGREES) * ROTATION_SNAP_DEGREES : yawDegrees;
+  };
+
   const findMarkerUnderPoint = (point: Point2D): 'source' | 'listener' | null => {
     const widthPixels = containerRef.current?.clientWidth ?? 1;
     const handleRadiusWorld = MARKER_HIT_RADIUS_PIXELS / pixelsPerMeter(widthPixels, transform.spanMeters);
@@ -400,6 +452,14 @@ export function RoomOrthographicView({
     const pixelPoint = eventToPixelPoint(event);
     const point = pixelToWorldHere(pixelPoint);
 
+    // Rotation handles sit outside their markers, so they are tested first — otherwise a handle overlapping
+    // the other marker's body would be unreachable.
+    const rotationHit = findRotationHandleUnderPoint(pixelPoint);
+    if (rotationHit) {
+      dragModeRef.current = { kind: rotationHit === 'source' ? 'rotate-source' : 'rotate-listener' };
+      return;
+    }
+
     const markerHit = findMarkerUnderPoint(point);
     if (markerHit === 'source') {
       dragModeRef.current = { kind: 'move-source', startPixelPoint: pixelPoint, hasCrossedClickThreshold: false };
@@ -453,9 +513,13 @@ export function RoomOrthographicView({
     startMoveSelectedBoxesDrag(resolvedBox, resolvedBox.id, point, pixelPoint);
   };
 
-  const updateHoverCursor = (point: Point2D) => {
+  const updateHoverCursor = (pixelPoint: Point2D, point: Point2D) => {
     if (activeTool !== 'select') {
       setCursorStyle('crosshair');
+      return;
+    }
+    if (findRotationHandleUnderPoint(pixelPoint)) {
+      setCursorStyle('grab');
       return;
     }
     if (findMarkerUnderPoint(point)) {
@@ -471,7 +535,7 @@ export function RoomOrthographicView({
     const pixelPoint = eventToPixelPoint(event);
 
     if (!dragMode) {
-      updateHoverCursor(pixelToWorldHere(pixelPoint));
+      updateHoverCursor(pixelPoint, pixelToWorldHere(pixelPoint));
       return;
     }
 
@@ -483,6 +547,20 @@ export function RoomOrthographicView({
         const delta = { horizontal: pixelPoint.horizontal - dragMode.lastPixelPoint.horizontal, vertical: pixelPoint.vertical - dragMode.lastPixelPoint.vertical };
         setTransform(current => panViewTransform(current, delta, widthPixels));
         dragModeRef.current = { ...dragMode, lastPixelPoint: pixelPoint };
+        break;
+      }
+      case 'rotate-source':
+      case 'rotate-listener': {
+        const marker = dragMode.kind === 'rotate-source' ? source : listener;
+        const yawDegrees = yawFromPointer(marker, point);
+        if (dragMode.kind === 'rotate-source') onRotateSource(yawDegrees);
+        else onRotateListener(yawDegrees);
+
+        setFloatingLabel({
+          pixelPoint: markerPixelPoint(marker),
+          placement: 'below',
+          text: `${Math.round(((yawDegrees % 360) + 360) % 360)}°`,
+        });
         break;
       }
       case 'move-source':

@@ -6,7 +6,7 @@ import { MINIMUM_CONTRIBUTION_DISTANCE_METERS } from './roomAcousticsDefaults';
 import { toAxisAlignedBox } from './roomBoxGeometry';
 import { getEffectiveScatterAmount } from './roomMaterials';
 import type { FrequencyBandValues, RoomBox, RoomScene } from './roomTypes';
-import { horizontalPanPosition } from './stereoPanning';
+import { directivityGain } from './sourceDirectivity';
 import { distanceBetweenPoints, normalizeVector, type Vector3 } from './vector3';
 
 type Axis = 'x' | 'y' | 'z';
@@ -156,7 +156,13 @@ function buildArrivalForPath(
   }
 
   const clampedDistance = Math.max(totalPathLength, MINIMUM_CONTRIBUTION_DISTANCE_METERS);
-  const spreading = 1 / (clampedDistance * clampedDistance);
+  // The source radiates this path along its first leg, so that is the direction its directivity is read at.
+  const emissionDirection = normalizeVector({
+    x: reflectionPoints[0].x - scene.source.x,
+    y: reflectionPoints[0].y - scene.source.y,
+    z: reflectionPoints[0].z - scene.source.z,
+  });
+  const spreading = directivityGain(scene.source, emissionDirection) / (clampedDistance * clampedDistance);
   const spreadEnergy = { low: energy.low * spreading, mid: energy.mid * spreading, high: energy.high * spreading };
 
   const lastReflectionPoint = reflectionPoints[reflectionPoints.length - 1];
@@ -169,7 +175,7 @@ function buildArrivalForPath(
   return {
     timeSeconds: totalPathLength / speedOfSoundMetersPerSecond,
     energy: applyAirAbsorption(spreadEnergy, totalPathLength),
-    panPosition: horizontalPanPosition(directionFromListener),
+    directionFromListener,
   };
 }
 

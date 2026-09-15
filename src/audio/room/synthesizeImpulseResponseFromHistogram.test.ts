@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { synthesizeImpulseResponseFromHistogram } from './synthesizeImpulseResponseFromHistogram';
 import type { EnergyHistogram } from './buildEnergyHistogram';
+import { buildTestListener } from './testHelpers/buildTestRoomScene';
 
 function buildSilentHistogram(binCount: number, binDurationSeconds: number): EnergyHistogram {
   return {
@@ -8,7 +9,7 @@ function buildSilentHistogram(binCount: number, binDurationSeconds: number): Ene
     low: new Float32Array(binCount),
     mid: new Float32Array(binCount),
     high: new Float32Array(binCount),
-    pan: new Float32Array(binCount),
+    lateralPosition: new Float32Array(binCount),
   };
 }
 
@@ -29,7 +30,7 @@ function totalEnergy(impulseResponse: Float32Array<ArrayBuffer>): number {
 
 describe('synthesizeImpulseResponseFromHistogram', () => {
   test('an all-zero histogram is silent on every channel', () => {
-    const channels = synthesizeImpulseResponseFromHistogram(buildSilentHistogram(4, 0.005), 1000, true, buildSeededRandomSource());
+    const channels = synthesizeImpulseResponseFromHistogram(buildSilentHistogram(4, 0.005), 1000, buildTestListener({ mode: 'binaural' }), buildSeededRandomSource());
     for (const impulseResponse of channels) {
       expect(Array.from(impulseResponse).every(value => value === 0)).toBe(true);
     }
@@ -53,7 +54,7 @@ describe('synthesizeImpulseResponseFromHistogram', () => {
     histogram.mid.fill(energyPerBin);
     histogram.high.fill(energyPerBin);
 
-    for (const impulseResponse of synthesizeImpulseResponseFromHistogram(histogram, sampleRate, false, buildSeededRandomSource())) {
+    for (const impulseResponse of synthesizeImpulseResponseFromHistogram(histogram, sampleRate, buildTestListener(), buildSeededRandomSource())) {
       expect(totalEnergy(impulseResponse)).toBeCloseTo(energyPerBin * binCount, 4);
     }
   });
@@ -68,7 +69,7 @@ describe('synthesizeImpulseResponseFromHistogram', () => {
     const renderBandEnergy = (bands: ('low' | 'mid' | 'high')[]): number => {
       const histogram = buildSilentHistogram(binCount, 0.005);
       for (const band of bands) histogram[band].fill(1);
-      return totalEnergy(synthesizeImpulseResponseFromHistogram(histogram, sampleRate, false, buildSeededRandomSource())[0]);
+      return totalEnergy(synthesizeImpulseResponseFromHistogram(histogram, sampleRate, buildTestListener(), buildSeededRandomSource())[0]);
     };
 
     const fullBand = renderBandEnergy(['low', 'mid', 'high']);
@@ -86,7 +87,7 @@ describe('synthesizeImpulseResponseFromHistogram', () => {
     const histogram = buildSilentHistogram(4, 0.005);
     histogram.mid[1] = 1;
 
-    const [firstChannel] = synthesizeImpulseResponseFromHistogram(histogram, 1000, false, buildSeededRandomSource());
+    const [firstChannel] = synthesizeImpulseResponseFromHistogram(histogram, 1000, buildTestListener(), buildSeededRandomSource());
 
     const samplesPerBin = 5;
     const binEnergy = (binIndex: number) =>
@@ -101,44 +102,43 @@ describe('synthesizeImpulseResponseFromHistogram', () => {
 
   test('output length matches the histogram duration at the given sample rate, on every channel', () => {
     const histogram = buildSilentHistogram(4, 0.01); // 40ms total
-    for (const impulseResponse of synthesizeImpulseResponseFromHistogram(histogram, 2000, true, buildSeededRandomSource())) {
+    for (const impulseResponse of synthesizeImpulseResponseFromHistogram(histogram, 2000, buildTestListener({ mode: 'binaural' }), buildSeededRandomSource())) {
       expect(impulseResponse.length).toBe(80);
     }
   });
 
-  test('produces more than one channel, each with independently drawn noise so the reflection tail decorrelates between them', () => {
+  test('a binaural listener gets two channels that differ, since real reflections do not reach both ears alike', () => {
     const histogram = buildSilentHistogram(4, 0.005);
     histogram.low.fill(1);
     histogram.mid.fill(1);
     histogram.high.fill(1);
 
-    const channels = synthesizeImpulseResponseFromHistogram(histogram, 1000, true, buildSeededRandomSource());
+    const channels = synthesizeImpulseResponseFromHistogram(histogram, 1000, buildTestListener({ mode: 'binaural' }), buildSeededRandomSource());
 
     expect(channels.length).toBeGreaterThanOrEqual(2);
     expect(Array.from(channels[0])).not.toEqual(Array.from(channels[1]));
   });
 
-  test('when stereo simulation is enabled, a bin panned fully left produces louder tail energy on the left channel than the right', () => {
+  test("a tail arriving from one side is shadowed by the head on its way to the other ear", () => {
     const histogram = buildSilentHistogram(4, 0.005);
     histogram.low.fill(1);
     histogram.mid.fill(1);
-    histogram.pan.fill(-1);
+    histogram.lateralPosition.fill(-1);
 
-    const channels = synthesizeImpulseResponseFromHistogram(histogram, 1000, true, buildSeededRandomSource());
+    const channels = synthesizeImpulseResponseFromHistogram(histogram, 1000, buildTestListener({ mode: 'binaural' }), buildSeededRandomSource());
 
     expect(totalEnergy(channels[0])).toBeGreaterThan(totalEnergy(channels[1]));
   });
 
-  test('when stereo simulation is disabled, a fully left-panned bin lands at full level on both channels', () => {
+  test('a mono listener hears the same tail on both channels, wherever it comes from', () => {
     const histogram = buildSilentHistogram(4, 0.005);
     histogram.low.fill(1);
     histogram.mid.fill(1);
-    histogram.pan.fill(-1);
+    histogram.lateralPosition.fill(-1);
 
-    const channels = synthesizeImpulseResponseFromHistogram(histogram, 1000, false, buildSeededRandomSource());
+    const channels = synthesizeImpulseResponseFromHistogram(histogram, 1000, buildTestListener(), buildSeededRandomSource());
 
-    // Different noise realizations, so not sample-identical — but the same energy, which is what "not panned"
-    // means here.
-    expect(totalEnergy(channels[0])).toBeCloseTo(totalEnergy(channels[1]), 4);
+    // One omnidirectional capsule: no shadowing, and fully coherent, so the two channels are identical.
+    expect(Array.from(channels[0])).toEqual(Array.from(channels[1]));
   });
 });

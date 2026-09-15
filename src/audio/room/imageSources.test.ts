@@ -3,6 +3,7 @@ import { AIR_ABSORPTION_COEFFICIENTS_PER_METER } from './airAbsorption';
 import { computeImageSourceArrivals } from './imageSources';
 import { getEffectiveScatterAmount } from './roomMaterials';
 import type { RoomBox, RoomScene } from './roomTypes';
+import { buildTestScene } from './testHelpers/buildTestRoomScene';
 
 const SPEED_OF_SOUND = 343;
 const MAXIMUM_DISTANCE_METERS = 2000;
@@ -37,7 +38,7 @@ describe('computeImageSourceArrivals', () => {
     // Source and listener both 2m above a large flat floor, 4m apart. The reflected path is the straight line
     // from the source's mirror image below the floor: sqrt(4² + 4²) = 5.657m, against 4m direct.
     const floor = buildSlab();
-    const scene: RoomScene = { boxes: [floor], source: { x: 0, y: 2, z: 0 }, listener: { x: 4, y: 2, z: 0 } };
+    const scene: RoomScene = buildTestScene(({ boxes: [floor], source: { x: 0, y: 2, z: 0 }, listener: { x: 4, y: 2, z: 0 } }));
 
     const arrivals = computeImageSourceArrivals(scene, 2, SPEED_OF_SOUND, MAXIMUM_DISTANCE_METERS);
 
@@ -51,7 +52,7 @@ describe('computeImageSourceArrivals', () => {
     // The same geometry, but the floor is a tile off to one side. The reflection would have to land at x=2,
     // which is not on the tile — an infinite-plane test would wrongly accept it.
     const tile = buildSlab({ x: 20, z: -2, width: 4, depth: 4 });
-    const scene: RoomScene = { boxes: [tile], source: { x: 0, y: 2, z: 0 }, listener: { x: 4, y: 2, z: 0 } };
+    const scene: RoomScene = buildTestScene(({ boxes: [tile], source: { x: 0, y: 2, z: 0 }, listener: { x: 4, y: 2, z: 0 } }));
 
     expect(computeImageSourceArrivals(scene, 2, SPEED_OF_SOUND, MAXIMUM_DISTANCE_METERS)).toHaveLength(0);
   });
@@ -61,7 +62,7 @@ describe('computeImageSourceArrivals', () => {
     // but the sound cannot actually travel that way.
     const floor = buildSlab();
     const barrier = buildSlab({ id: 'barrier', x: 1.8, y: 0, z: -2, width: 0.2, height: 3, depth: 4 });
-    const scene: RoomScene = { boxes: [floor, barrier], source: { x: 0, y: 2, z: 0 }, listener: { x: 4, y: 2, z: 0 } };
+    const scene: RoomScene = buildTestScene(({ boxes: [floor, barrier], source: { x: 0, y: 2, z: 0 }, listener: { x: 4, y: 2, z: 0 } }));
 
     const floorEchoTimeSeconds = Math.hypot(4, 4) / SPEED_OF_SOUND;
     const arrivals = computeImageSourceArrivals(scene, 1, SPEED_OF_SOUND, MAXIMUM_DISTANCE_METERS);
@@ -75,7 +76,7 @@ describe('computeImageSourceArrivals', () => {
     // no single-surface pass would ever find.
     const nearWall = buildSlab({ id: 'near-wall', x: -1, y: -5, z: -5, width: 1, height: 10, depth: 10 });
     const farWall = buildSlab({ id: 'far-wall', x: 10, y: -5, z: -5, width: 1, height: 10, depth: 10 });
-    const scene: RoomScene = { boxes: [nearWall, farWall], source: { x: 3, y: 1, z: 0 }, listener: { x: 7, y: 1, z: 0 } };
+    const scene: RoomScene = buildTestScene(({ boxes: [nearWall, farWall], source: { x: 3, y: 1, z: 0 }, listener: { x: 7, y: 1, z: 0 } }));
 
     const arrivals = computeImageSourceArrivals(scene, 2, SPEED_OF_SOUND, MAXIMUM_DISTANCE_METERS);
     const doubleBounce = arrivals.find(arrival => Math.abs(arrival.timeSeconds - 16 / SPEED_OF_SOUND) < 1e-9);
@@ -89,11 +90,7 @@ describe('computeImageSourceArrivals', () => {
   test('a rougher surface returns a weaker specular echo, because more of its energy scatters instead', () => {
     // The scattered remainder is not lost — it is what the ray tracer's diffuse lobe puts into the reverb
     // tail. This is the split that keeps the two mechanisms from both claiming the same energy.
-    const buildSceneWith = (materialId: RoomBox['materialId']): RoomScene => ({
-      boxes: [buildSlab({ materialId, absorption: { low: 0.2, mid: 0.2, high: 0.2 } })],
-      source: { x: 0, y: 2, z: 0 },
-      listener: { x: 4, y: 2, z: 0 },
-    });
+    const buildSceneWith = (materialId: RoomBox['materialId']): RoomScene => (buildTestScene({ boxes: [buildSlab({ materialId, absorption: { low: 0.2, mid: 0.2, high: 0.2 } })], source: { x: 0, y: 2, z: 0 }, listener: { x: 4, y: 2, z: 0 } }));
 
     const [smoothEcho] = computeImageSourceArrivals(buildSceneWith('smooth-metal'), 1, SPEED_OF_SOUND, MAXIMUM_DISTANCE_METERS);
     const [roughEcho] = computeImageSourceArrivals(buildSceneWith('grass'), 1, SPEED_OF_SOUND, MAXIMUM_DISTANCE_METERS);
@@ -103,25 +100,25 @@ describe('computeImageSourceArrivals', () => {
 
   test('an absorber blocks a path but never creates an echo of its own', () => {
     const absorbingFloor = buildSlab({ kind: 'absorber', materialId: 'generic-absorber' });
-    const scene: RoomScene = { boxes: [absorbingFloor], source: { x: 0, y: 2, z: 0 }, listener: { x: 4, y: 2, z: 0 } };
+    const scene: RoomScene = buildTestScene(({ boxes: [absorbingFloor], source: { x: 0, y: 2, z: 0 }, listener: { x: 4, y: 2, z: 0 } }));
 
     expect(computeImageSourceArrivals(scene, 2, SPEED_OF_SOUND, MAXIMUM_DISTANCE_METERS)).toHaveLength(0);
   });
 
-  test('an echo arriving from one side of the listener is panned toward that side', () => {
-    // A wall off to the listener's left along the x axis, which is the left/right axis in the editor's top
-    // view — so its echo must read as coming from the left.
+  test('an echo reports the direction it arrives from, so the listener can place it', () => {
+    // A wall off to one side along the x axis: the echo has to report that it comes from over there, or the
+    // head model has nothing to work with.
     const leftWall = buildSlab({ id: 'left-wall', x: -6, y: -5, z: -20, width: 1, height: 10, depth: 40 });
-    const scene: RoomScene = { boxes: [leftWall], source: { x: 0, y: 1, z: 2 }, listener: { x: 0, y: 1, z: -2 } };
+    const scene: RoomScene = buildTestScene(({ boxes: [leftWall], source: { x: 0, y: 1, z: 2 }, listener: { x: 0, y: 1, z: -2 } }));
 
     const [echo] = computeImageSourceArrivals(scene, 1, SPEED_OF_SOUND, MAXIMUM_DISTANCE_METERS);
 
     expect(echo).toBeDefined();
-    expect(echo.panPosition).toBeLessThan(0);
+    expect(echo.directionFromListener.x).toBeLessThan(0);
   });
 
   test('requesting no reflections returns nothing at all', () => {
-    const scene: RoomScene = { boxes: [buildSlab()], source: { x: 0, y: 2, z: 0 }, listener: { x: 4, y: 2, z: 0 } };
+    const scene: RoomScene = buildTestScene(({ boxes: [buildSlab()], source: { x: 0, y: 2, z: 0 }, listener: { x: 4, y: 2, z: 0 } }));
     expect(computeImageSourceArrivals(scene, 0, SPEED_OF_SOUND, MAXIMUM_DISTANCE_METERS)).toHaveLength(0);
   });
 });

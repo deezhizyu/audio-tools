@@ -1,6 +1,8 @@
 import { getRoomMaterial } from '../../audio/room/roomMaterials';
-import type { RoomBox, RoomPoint3D } from '../../audio/room/roomTypes';
+import type { RoomBox, RoomListener, RoomSource } from '../../audio/room/roomTypes';
+import { directivityGain, orientationForward } from '../../audio/room/sourceDirectivity';
 import { getBoxRectOnAxes, type OrthographicAxes, type Point2D, type Rect2D } from '../../audio/room/roomEditorGeometry';
+import type { Vector3 } from '../../audio/room/vector3';
 
 /** How many world meters are visible across the canvas width, and which world point sits at the canvas's
     center — together these define one view's pan/zoom state. Kept per-view (not global), since panning the
@@ -16,6 +18,18 @@ export const MAXIMUM_VIEW_SPAN_METERS = 60;
 
 const RESIZE_HANDLE_HALF_SIZE_PIXELS = 4;
 const MARKER_RADIUS_PIXELS = 6;
+
+/** Marker decoration is sized in pixels rather than meters, so a facing arrow stays grabbable and a pair of
+    ears stays legible at any zoom level — these are interface elements pointing at a position, not objects
+    occupying space in the room. */
+export const FACING_ARROW_LENGTH_PIXELS = 26;
+const FACING_ARROW_HEAD_PIXELS = 6;
+export const ROTATION_HANDLE_RADIUS_PIXELS = 5;
+const EAR_OFFSET_PIXELS = 11;
+const EAR_RADIUS_PIXELS = 3;
+const MONO_RING_RADIUS_PIXELS = 10;
+const DIRECTIVITY_LOBE_RADIUS_PIXELS = 22;
+const DIRECTIVITY_LOBE_SEGMENTS = 64;
 
 export interface RoomViewTheme {
   gridColor: string;
@@ -33,10 +47,38 @@ export interface RoomViewDrawParams {
   horizontalAxisLabel: string;
   verticalAxisLabel: string;
   selectedBoxIds: ReadonlySet<string>;
-  source: RoomPoint3D;
-  listener: RoomPoint3D;
+  source: RoomSource;
+  listener: RoomListener;
   theme: RoomViewTheme;
   transform: ViewTransform;
+}
+
+/**
+ * A 3D direction flattened onto the two axes this view shows, in screen pixels.
+ *
+ * Orientation lives in the horizontal plane, so only the top view sees it head-on. Projecting rather than
+ * special-casing means the front and side views foreshorten a facing direction exactly the way an
+ * orthographic drawing should — a listener facing straight into the screen shows a short arrow or none at
+ * all, which is the honest depiction of a direction that view cannot show.
+ */
+function projectDirectionToPixels(direction: Vector3, axes: OrthographicAxes, lengthPixels: number): Point2D {
+  return { horizontal: direction[axes.horizontal] * lengthPixels, vertical: direction[axes.vertical] * lengthPixels };
+}
+
+/** The listener's right-hand direction — the interaural axis the ears sit on. Matches
+    `toListenerLocalDirection`'s frame, so the drawn ears are the ears the simulation actually models. */
+function rightOfOrientation(yawDegrees: number): Vector3 {
+  const forward = orientationForward(yawDegrees);
+  return { x: -forward.z, y: 0, z: forward.x };
+}
+
+/** Where a rotation handle sits relative to its marker, in pixels — shared by the drawing below and the
+    view's hit-testing, so what the user grabs is exactly what they see. Null when this view is looking
+    straight down the facing direction, leaving nothing long enough to aim at. */
+export function rotationHandlePixelOffset(yawDegrees: number, axes: OrthographicAxes): Point2D | null {
+  const offset = projectDirectionToPixels(orientationForward(yawDegrees), axes, FACING_ARROW_LENGTH_PIXELS);
+  const length = Math.hypot(offset.horizontal, offset.vertical);
+  return length < ROTATION_HANDLE_RADIUS_PIXELS ? null : offset;
 }
 
 /** Scale is always derived from the canvas width (not `min(width, height)`) so `transform.spanMeters`
@@ -92,7 +134,7 @@ export function panViewTransform(transform: ViewTransform, deltaPixels: Point2D,
   };
 }
 
-function pointOnAxes(point: RoomPoint3D, axes: OrthographicAxes): Point2D {
+function pointOnAxes(point: { x: number; y: number; z: number }, axes: OrthographicAxes): Point2D {
   return { horizontal: point[axes.horizontal], vertical: point[axes.vertical] };
 }
 
@@ -212,14 +254,120 @@ function drawBox(context: CanvasRenderingContext2D, box: RoomBox, params: RoomVi
   if (isSelected && params.selectedBoxIds.size === 1) drawResizeHandles(context, rect, params);
 }
 
-function drawMarker(context: CanvasRenderingContext2D, point: Point2D, color: string): void {
+function drawMarkerDot(context: CanvasRenderingContext2D, point: Point2D, color: string, radiusPixels = MARKER_RADIUS_PIXELS): void {
   context.fillStyle = color;
   context.beginPath();
-  context.arc(point.horizontal, point.vertical, MARKER_RADIUS_PIXELS, 0, Math.PI * 2);
+  context.arc(point.horizontal, point.vertical, radiusPixels, 0, Math.PI * 2);
   context.fill();
   context.strokeStyle = 'rgba(0, 0, 0, 0.4)';
   context.lineWidth = 1.5;
   context.stroke();
+}
+
+/** An arrow from the marker along its facing direction, ending in the dot that rotates it. */
+function drawFacingArrow(context: CanvasRenderingContext2D, center: Point2D, offset: Point2D, color: string): void {
+  const tip = { horizontal: center.horizontal + offset.horizontal, vertical: center.vertical + offset.vertical };
+  const length = Math.hypot(offset.horizontal, offset.vertical);
+  if (length < 1) return;
+
+  const unit = { horizontal: offset.horizontal / length, vertical: offset.vertical / length };
+  const perpendicular = { horizontal: -unit.vertical, vertical: unit.horizontal };
+
+  context.strokeStyle = color;
+  context.lineWidth = 1.5;
+  context.beginPath();
+  context.moveTo(center.horizontal, center.vertical);
+  context.lineTo(tip.horizontal, tip.vertical);
+  context.stroke();
+
+  context.fillStyle = color;
+  context.beginPath();
+  context.moveTo(tip.horizontal, tip.vertical);
+  context.lineTo(
+    tip.horizontal - unit.horizontal * FACING_ARROW_HEAD_PIXELS + perpendicular.horizontal * (FACING_ARROW_HEAD_PIXELS / 2),
+    tip.vertical - unit.vertical * FACING_ARROW_HEAD_PIXELS + perpendicular.vertical * (FACING_ARROW_HEAD_PIXELS / 2),
+  );
+  context.lineTo(
+    tip.horizontal - unit.horizontal * FACING_ARROW_HEAD_PIXELS - perpendicular.horizontal * (FACING_ARROW_HEAD_PIXELS / 2),
+    tip.vertical - unit.vertical * FACING_ARROW_HEAD_PIXELS - perpendicular.vertical * (FACING_ARROW_HEAD_PIXELS / 2),
+  );
+  context.closePath();
+  context.fill();
+}
+
+/**
+ * The listener: a dot, the direction it faces, and the two ears that direction places.
+ *
+ * Which way a listener faces is not decoration here — it decides which ear each reflection reaches first and
+ * how much of it the head blocks on the way to the other one (`listenerHeadModel.ts`), so a room heard from
+ * the same spot facing two different ways is two different sounds. Drawing the ears makes that legible: the
+ * interaural axis is visibly perpendicular to the gaze, and turning the listener visibly swaps which side of
+ * the room lands on which ear. A mono listener is drawn as a plain ring instead, because it genuinely has no
+ * orientation — one omnidirectional capsule hears the same thing whichever way it is pointed.
+ */
+function drawListenerMarker(context: CanvasRenderingContext2D, params: RoomViewDrawParams): void {
+  const center = worldToPixel(pointOnAxes(params.listener, params.axes), params.widthPixels, params.heightPixels, params.transform);
+  const color = params.theme.listenerColor;
+
+  if (params.listener.mode === 'mono') {
+    context.strokeStyle = color;
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.arc(center.horizontal, center.vertical, MONO_RING_RADIUS_PIXELS, 0, Math.PI * 2);
+    context.stroke();
+    drawMarkerDot(context, center, color);
+    return;
+  }
+
+  const earOffset = projectDirectionToPixels(rightOfOrientation(params.listener.yawDegrees), params.axes, EAR_OFFSET_PIXELS);
+  for (const side of [1, -1]) {
+    drawMarkerDot(
+      context,
+      { horizontal: center.horizontal + earOffset.horizontal * side, vertical: center.vertical + earOffset.vertical * side },
+      color,
+      EAR_RADIUS_PIXELS,
+    );
+  }
+
+  drawFacingArrow(context, center, projectDirectionToPixels(orientationForward(params.listener.yawDegrees), params.axes, FACING_ARROW_LENGTH_PIXELS), color);
+  drawMarkerDot(context, center, color);
+}
+
+/**
+ * The source: a dot ringed by the actual shape of what it radiates.
+ *
+ * The outline is the directivity model's own polar response (`directivityGain`) sampled around this view's
+ * plane, not an illustration of one — an omnidirectional source draws a circle, a cardioid draws a cardioid,
+ * and narrowing the beam visibly narrows it. Sampling directions that lie in the view plane means each view
+ * shows the true cross-section of the three-dimensional lobe, so the top view reads exactly and the front and
+ * side views foreshorten honestly.
+ */
+function drawSourceMarker(context: CanvasRenderingContext2D, params: RoomViewDrawParams): void {
+  const center = worldToPixel(pointOnAxes(params.source, params.axes), params.widthPixels, params.heightPixels, params.transform);
+  const color = params.theme.sourceColor;
+
+  context.strokeStyle = color;
+  context.lineWidth = 1.5;
+  context.globalAlpha = 0.7;
+  context.beginPath();
+  for (let segment = 0; segment <= DIRECTIVITY_LOBE_SEGMENTS; segment++) {
+    const angle = (segment / DIRECTIVITY_LOBE_SEGMENTS) * Math.PI * 2;
+    const direction: Vector3 = { x: 0, y: 0, z: 0 };
+    direction[params.axes.horizontal] = Math.cos(angle);
+    direction[params.axes.vertical] = Math.sin(angle);
+
+    const radius = DIRECTIVITY_LOBE_RADIUS_PIXELS * directivityGain(params.source, direction);
+    const point = { horizontal: center.horizontal + Math.cos(angle) * radius, vertical: center.vertical + Math.sin(angle) * radius };
+    if (segment === 0) context.moveTo(point.horizontal, point.vertical);
+    else context.lineTo(point.horizontal, point.vertical);
+  }
+  context.stroke();
+  context.globalAlpha = 1;
+
+  if (params.source.directivity.enabled) {
+    drawFacingArrow(context, center, projectDirectionToPixels(orientationForward(params.source.yawDegrees), params.axes, FACING_ARROW_LENGTH_PIXELS), color);
+  }
+  drawMarkerDot(context, center, color);
 }
 
 export function drawRoomOrthographicView(context: CanvasRenderingContext2D, params: RoomViewDrawParams): void {
@@ -231,14 +379,6 @@ export function drawRoomOrthographicView(context: CanvasRenderingContext2D, para
     drawBox(context, box, params, params.selectedBoxIds.has(box.id));
   }
 
-  drawMarker(
-    context,
-    worldToPixel(pointOnAxes(params.source, params.axes), params.widthPixels, params.heightPixels, params.transform),
-    params.theme.sourceColor,
-  );
-  drawMarker(
-    context,
-    worldToPixel(pointOnAxes(params.listener, params.axes), params.widthPixels, params.heightPixels, params.transform),
-    params.theme.listenerColor,
-  );
+  drawSourceMarker(context, params);
+  drawListenerMarker(context, params);
 }

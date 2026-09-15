@@ -3,7 +3,7 @@ import { isSegmentUnobstructed } from './lineOfSight';
 import { intersectRayWithBox, type AxisAlignedBox, type Ray } from './rayBoxIntersection';
 import { getEffectiveScatterAmount } from './roomMaterials';
 import { toAxisAlignedBox } from './roomBoxGeometry';
-import { horizontalPanPosition } from './stereoPanning';
+import { lateralPositionInListenerFrame } from './listenerHeadModel';
 import {
   energyPerRay,
   INTERACTIVE_MAXIMUM_BOUNCES,
@@ -17,7 +17,8 @@ import {
   RUSSIAN_ROULETTE_THRESHOLD,
   SPEED_OF_SOUND_METERS_PER_SECOND,
 } from './roomAcousticsDefaults';
-import type { FrequencyBandValues, RoomBox, RoomScene } from './roomTypes';
+import type { FrequencyBandValues, RoomBox, RoomListener, RoomScene } from './roomTypes';
+import { directivityGain } from './sourceDirectivity';
 import {
   addVectors,
   distanceBetweenPoints,
@@ -65,10 +66,10 @@ export interface ImpulseArrival {
       power (see `energyPerRay`), so it is directly comparable to the direct path's own `1/distance²` and no
       consumer needs to normalize by ray count. */
   energy: FrequencyBandValues;
-  /** This arrival's left/right position as heard from the listener (-1 fully left, +1 fully right, 0
-      centered) — see `horizontalPanPosition` in `stereoPanning.ts`. Always computed, so stereo simulation
-      can be toggled purely at consumption time (`buildEnergyHistogram.ts`) without re-tracing rays. */
-  panPosition: number;
+  /** Where this arrival sits on the listener's own left/right axis (-1 fully left, +1 fully right, 0 straight
+      ahead or behind) — see `lateralPositionInListenerFrame` in `listenerHeadModel.ts`. Measured in the
+      listener's frame rather than the room's, so turning the listener really does turn the room around them. */
+  lateralPosition: number;
 }
 
 /** A small offset nudging a point off the surface it sits on, so the next intersection test doesn't
@@ -164,7 +165,7 @@ function recordReflectionArrival(
   distanceTraveledToHit: number,
   throughputAtHit: FrequencyBandValues,
   energyPerRayValue: number,
-  listener: Vector3,
+  listener: RoomListener,
   boxBounds: AxisAlignedBox[],
   params: RayTracingParams,
   arrivals: ImpulseArrival[],
@@ -200,12 +201,12 @@ function recordReflectionArrival(
   const totalDistance = distanceTraveledToHit + distanceToListener;
 
   // The arrival reaches the listener from `originPoint`, i.e. along the reverse of `directionToListener`.
-  const panPosition = horizontalPanPosition(scaleVector(directionToListener, -1));
+  const lateralPosition = lateralPositionInListenerFrame(scaleVector(directionToListener, -1), listener);
 
   arrivals.push({
     timeSeconds: totalDistance / params.speedOfSoundMetersPerSecond,
     energy: applyAirAbsorption(scaleBandValues(throughputAtHit, attenuation), totalDistance),
-    panPosition,
+    lateralPosition,
   });
 }
 
@@ -217,6 +218,9 @@ function recordReflectionArrival(
     the raw material `buildEnergyHistogram.ts` turns into a decay curve and
     `synthesizeImpulseResponseFromHistogram.ts` into the reverb tail.
 
+    Each ray leaves carrying its share of the source's power shaped by the source's own directivity, so an
+    aimed source genuinely floods one part of the room and starves another rather than lighting it evenly.
+
     Two paths are deliberately not sampled here, because both are computed exactly elsewhere and would only
     be approximated worse by random sampling: the direct, unreflected path (`directSound.ts`), and the
     low-order all-specular echoes (`imageSources.ts`) that `includeSpecularLobe` below excludes. */
@@ -227,12 +231,17 @@ export function traceRays(scene: RoomScene, params: RayTracingParams): ImpulseAr
   const energyPerRayValue = energyPerRay(params.numberOfRays);
 
   for (let rayIndex = 0; rayIndex < params.numberOfRays; rayIndex++) {
-    let position = { ...scene.source };
+    let position: Vector3 = { x: scene.source.x, y: scene.source.y, z: scene.source.z };
     let direction = randomUnitVector(params.randomSource);
-    // The fraction of this ray's starting energy still in flight, per band — 1 until the first absorption.
+
+    // The fraction of this ray's starting energy still in flight, per band. It starts at the source's
+    // directivity in the direction this ray happens to leave along rather than at 1, so a narrowly-aimed
+    // source's off-axis rays start out faint and are dropped below without ever being traced.
+    const emittedFraction = directivityGain(scene.source, direction);
+    if (emittedFraction < params.minimumEnergyThreshold) continue;
     // Tracked as a fraction rather than as absolute energy so Russian roulette's threshold below means the
     // same thing regardless of how many rays the simulation happens to be firing.
-    let throughput: FrequencyBandValues = { low: 1, mid: 1, high: 1 };
+    let throughput: FrequencyBandValues = { low: emittedFraction, mid: emittedFraction, high: emittedFraction };
     let distanceTraveled = 0;
     // Only a ray that has mirror-reflected at every bounce so far is travelling a path the image-source pass
     // also computes; once it scatters, it is carrying diffuse energy that pass knows nothing about, and its

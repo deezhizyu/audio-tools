@@ -83,8 +83,48 @@ export interface RoomPoint3D {
   z: number;
 }
 
+/**
+ * How orientation is expressed throughout the simulator and the editor: a single yaw angle in degrees, in
+ * the horizontal plane. 0 faces +x, and increasing yaw turns toward +z — which in the editor's top view
+ * (`TOP_VIEW_AXES`, x across and z down) reads as starting out facing right and turning clockwise.
+ *
+ * Yaw only, no pitch. Turning your head left or right transforms what you hear completely; tilting it up or
+ * down barely changes anything a two-eared model can represent, and a source's useful directivity is almost
+ * always about which way it is aimed across the room.
+ */
+export type YawDegrees = number;
+
+/**
+ * How a source radiates, as the dipole model Steam Audio uses: `gain(θ) = |(1 - weight) + weight·cos θ|^sharpness`
+ * about the direction the source faces. `weight` 0 is omnidirectional, 0.5 is a cardioid, 1 a figure-of-eight;
+ * `sharpness` narrows whatever pattern `weight` chose.
+ */
+export interface SourceDirectivity {
+  /** When false the source radiates equally in every direction and the two numbers below are ignored — but
+      kept, so toggling directionality back on restores the pattern the user had dialed in. */
+  enabled: boolean;
+  weight: number;
+  sharpness: number;
+}
+
+export interface RoomSource extends RoomPoint3D {
+  yawDegrees: YawDegrees;
+  directivity: SourceDirectivity;
+}
+
+/** Whether the listener hears with two ears or one. `binaural` models a head: each ear gets its own arrival
+    time and its own frequency-dependent shadowing, which is what lets left, right, front and behind sound
+    different from each other. `mono` collapses that to a single omnidirectional capsule, giving two identical
+    channels. */
+export type ListenerMode = 'binaural' | 'mono';
+
+export interface RoomListener extends RoomPoint3D {
+  yawDegrees: YawDegrees;
+  mode: ListenerMode;
+}
+
 export interface RoomScene {
   boxes: RoomBox[];
-  source: RoomPoint3D;
-  listener: RoomPoint3D;
+  source: RoomSource;
+  listener: RoomListener;
 }

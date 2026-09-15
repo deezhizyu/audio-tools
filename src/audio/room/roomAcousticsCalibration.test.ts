@@ -4,6 +4,7 @@ import { computeDirectSoundArrival } from './directSound';
 import { estimateReverberationTimeSeconds } from './estimateReverbTime';
 import { SPEED_OF_SOUND_METERS_PER_SECOND } from './roomAcousticsDefaults';
 import type { RoomBox, RoomScene } from './roomTypes';
+import { buildTestScene } from './testHelpers/buildTestRoomScene';
 import { synthesizeRoomImpulseResponse } from './synthesizeRoomImpulseResponse';
 import { DEFAULT_RAY_TRACING_PARAMS, type RayTracingParams } from './traceRays';
 
@@ -63,7 +64,7 @@ function buildShoeboxScene(absorptionCoefficient: number): RoomScene {
     materialId: 'generic-object',
     textureIntensity: 1,
   };
-  return { boxes: [shell], source: SOURCE, listener: LISTENER };
+  return buildTestScene({ boxes: [shell], source: SOURCE, listener: LISTENER });
 }
 
 function buildParams(): RayTracingParams {
@@ -71,7 +72,7 @@ function buildParams(): RayTracingParams {
 }
 
 function simulateShoebox(absorptionCoefficient: number): Float32Array<ArrayBuffer> {
-  return synthesizeRoomImpulseResponse(buildShoeboxScene(absorptionCoefficient), SAMPLE_RATE, buildParams(), false)[0];
+  return synthesizeRoomImpulseResponse(buildShoeboxScene(absorptionCoefficient), SAMPLE_RATE, buildParams())[0];
 }
 
 /**
@@ -168,10 +169,9 @@ describe('room acoustics calibration', () => {
       const scene = buildShoeboxScene(0.2);
       const energy = energyOverTime(
         synthesizeRoomImpulseResponse(
-          { ...scene, listener: { ...SOURCE, x: SOURCE.x + distanceMeters } },
+          { ...scene, listener: { ...scene.listener, x: SOURCE.x + distanceMeters, y: SOURCE.y, z: SOURCE.z } },
           SAMPLE_RATE,
           buildParams(),
-          false,
         )[0],
       );
       const reflectionStart = Math.floor((Math.hypot(distanceMeters, ROOM_HEIGHT_METERS) / SPEED_OF_SOUND_METERS_PER_SECOND) * SAMPLE_RATE);
@@ -182,8 +182,8 @@ describe('room acoustics calibration', () => {
   });
 
   test('with no surfaces at all, the impulse response is just the direct sound at its inverse-square level', () => {
-    const scene: RoomScene = { boxes: [], source: SOURCE, listener: LISTENER };
-    const [impulseResponse] = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, buildParams(), false);
+    const scene = buildTestScene({ boxes: [], source: SOURCE, listener: LISTENER });
+    const [impulseResponse] = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, buildParams());
     const renderedEnergy = sumRange(energyOverTime(impulseResponse), 0, impulseResponse.length);
     const expectedEnergy = computeDirectSoundArrival(scene, SPEED_OF_SOUND_METERS_PER_SECOND).energy.low;
 

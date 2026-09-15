@@ -19,8 +19,8 @@ function buildScene(): RoomScene {
         textureIntensity: 1,
       },
     ],
-    source: { x: 1, y: 1, z: 1 },
-    listener: { x: 2, y: 1, z: 2 },
+    source: { x: 1, y: 1, z: 1, yawDegrees: 90, directivity: { enabled: true, weight: 0.5, sharpness: 2 } },
+    listener: { x: 2, y: 1, z: 2, yawDegrees: 270, mode: 'binaural' },
   };
 }
 
@@ -32,7 +32,7 @@ describe('room file format', () => {
 
   test('serializes with the current format version', () => {
     const written = JSON.parse(serializeRoomScene(buildScene()));
-    expect(written.formatVersion).toBe(2);
+    expect(written.formatVersion).toBe(3);
   });
 
   test('rejects text that is not JSON', () => {
@@ -102,5 +102,42 @@ describe('room file format', () => {
     const excessive = buildScene();
     excessive.boxes[0].textureIntensity = 99;
     expect(parseRoomScene(JSON.stringify({ formatVersion: 2, scene: excessive })).boxes[0].textureIntensity).toBe(2);
+  });
+
+  test('a file written before source and listener had orientations still loads, facing along +x', () => {
+    // Version 2 stored both as bare positions. Reading one back has to produce a scene that sounds exactly as
+    // it did when it was saved, which means omnidirectional and unrotated rather than anything more opinionated.
+    const version2File = JSON.stringify({
+      formatVersion: 2,
+      scene: {
+        boxes: [],
+        source: { x: 1, y: 1, z: 1 },
+        listener: { x: 2, y: 1, z: 2 },
+      },
+    });
+
+    const scene = parseRoomScene(version2File);
+
+    expect(scene.source).toEqual({ x: 1, y: 1, z: 1, yawDegrees: 0, directivity: { enabled: false, weight: 0.5, sharpness: 2 } });
+    expect(scene.listener).toEqual({ x: 2, y: 1, z: 2, yawDegrees: 0, mode: 'binaural' });
+  });
+
+  test('folds an out-of-range yaw back into a single turn and clamps a nonsensical directivity', () => {
+    const handEditedFile = JSON.stringify({
+      formatVersion: 3,
+      scene: {
+        boxes: [],
+        source: { x: 0, y: 0, z: 0, yawDegrees: -450, directivity: { enabled: true, weight: 99, sharpness: -3 } },
+        listener: { x: 1, y: 0, z: 0, yawDegrees: 720, mode: 'sideways' },
+      },
+    });
+
+    const scene = parseRoomScene(handEditedFile);
+
+    expect(scene.source.yawDegrees).toBe(270);
+    expect(scene.source.directivity.weight).toBe(1);
+    expect(scene.source.directivity.sharpness).toBe(1);
+    expect(scene.listener.yawDegrees).toBe(0);
+    expect(scene.listener.mode).toBe('binaural');
   });
 });

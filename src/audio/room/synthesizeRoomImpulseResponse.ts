@@ -63,14 +63,13 @@ export function chooseImpulseResponseDurationSeconds(histogram: EnergyHistogram,
  * time — not a constant — can then decide how much of it is worth rendering (see
  * `chooseImpulseResponseDurationSeconds`).
  *
- * `stereoSimulationEnabled` controls whether arrivals are panned left/right by direction (Steam Audio's
- * constant-power stereo pan law — see `stereoPanning.ts`) or left centered on both channels.
+ * How any of it reaches two ears is the listener's own business (`listenerHeadModel.ts`): arrival times and
+ * shadowing for the coherent paths, shadowing and frequency-dependent coherence for the tail.
  */
 export function synthesizeRoomImpulseResponse(
   scene: RoomScene,
   sampleRate: number,
   rayTracingParams: RayTracingParams,
-  stereoSimulationEnabled: boolean,
 ): Float32Array<ArrayBuffer>[] {
   const arrivals = traceRays(scene, rayTracingParams);
   const coherentArrivals = [
@@ -89,8 +88,8 @@ export function synthesizeRoomImpulseResponse(
     chooseImpulseResponseDurationSeconds(tracedHistogram, latestArrivalTimeSeconds(coherentArrivals)),
   );
 
-  const channels = synthesizeImpulseResponseFromHistogram(histogram, sampleRate, stereoSimulationEnabled, rayTracingParams.randomSource);
-  renderDiscreteArrivals(channels, coherentArrivals, sampleRate, stereoSimulationEnabled);
+  const channels = synthesizeImpulseResponseFromHistogram(histogram, sampleRate, scene.listener, rayTracingParams.randomSource);
+  renderDiscreteArrivals(channels, coherentArrivals, sampleRate, scene.listener);
 
   return channels;
 }

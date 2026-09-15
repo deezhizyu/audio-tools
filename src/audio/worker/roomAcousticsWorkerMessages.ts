@@ -10,7 +10,6 @@ export type RoomAcousticsWorkerRequest = {
   requestId: number;
   scene: RoomScene;
   sampleRate: number;
-  stereoSimulationEnabled: boolean;
   quality: SimulationQuality;
 };
 

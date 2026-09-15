@@ -1,7 +1,25 @@
 import { DEFAULT_ABSORBER_MATERIAL_ID, DEFAULT_OBJECT_MATERIAL_ID, ROOM_MATERIALS } from './roomMaterials';
-import type { FrequencyBandValues, RoomBox, RoomBoxKind, RoomMaterialId, RoomPoint3D, RoomScene } from './roomTypes';
+import type {
+  FrequencyBandValues,
+  ListenerMode,
+  RoomBox,
+  RoomBoxKind,
+  RoomListener,
+  RoomMaterialId,
+  RoomPoint3D,
+  RoomScene,
+  RoomSource,
+  SourceDirectivity,
+} from './roomTypes';
+import {
+  MAXIMUM_DIRECTIVITY_SHARPNESS,
+  MAXIMUM_DIRECTIVITY_WEIGHT,
+  MINIMUM_DIRECTIVITY_SHARPNESS,
+  MINIMUM_DIRECTIVITY_WEIGHT,
+  OMNIDIRECTIONAL_DIRECTIVITY,
+} from './sourceDirectivity';
 
-const ROOM_FILE_FORMAT_VERSION = 2;
+const ROOM_FILE_FORMAT_VERSION = 3;
 
 /** Default for a box's `textureIntensity` when a file predates that field entirely, or carries an
     out-of-range value — 1 means "the material's own baseline roughness, unmodified". */
@@ -32,10 +50,13 @@ interface RawRoomBox {
   textureIntensity?: unknown;
 }
 
+/** The source and listener as they come out of `JSON.parse`: a file written before either had an orientation
+    carries only a position, and a hand-edited one can carry anything at all. `migrateRoomSource` and
+    `migrateRoomListener` normalize both into their current shapes. */
 interface RawRoomScene {
   boxes: RawRoomBox[];
-  source: RoomPoint3D;
-  listener: RoomPoint3D;
+  source: RoomPoint3D & { yawDegrees?: unknown; directivity?: unknown };
+  listener: RoomPoint3D & { yawDegrees?: unknown; mode?: unknown };
 }
 
 export function serializeRoomScene(scene: RoomScene): string {
@@ -60,7 +81,11 @@ export function parseRoomScene(fileContents: string): RoomScene {
     throw new Error('This file is not a recognized room file.');
   }
 
-  return { ...parsed.scene, boxes: parsed.scene.boxes.map(migrateRoomBox) };
+  return {
+    boxes: parsed.scene.boxes.map(migrateRoomBox),
+    source: migrateRoomSource(parsed.scene.source),
+    listener: migrateRoomListener(parsed.scene.listener),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -135,4 +160,42 @@ function migrateRoomBox(rawBox: RawRoomBox): RoomBox {
     materialId,
     textureIntensity: clampTextureIntensity(rawBox.textureIntensity),
   };
+}
+
+/** Yaw is stored as a plain angle, so any real number is meaningful — it just gets folded back into 0-360 so
+    the editor's readout doesn't show -540°. */
+function normalizeYawDegrees(value: unknown): number {
+  if (!isFiniteNumber(value)) return 0;
+  return ((value % 360) + 360) % 360;
+}
+
+function clampToRange(value: unknown, minimum: number, maximum: number, fallback: number): number {
+  if (!isFiniteNumber(value)) return fallback;
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function migrateSourceDirectivity(value: unknown): SourceDirectivity {
+  if (!isRecord(value)) return OMNIDIRECTIONAL_DIRECTIVITY;
+  return {
+    enabled: value.enabled === true,
+    weight: clampToRange(value.weight, MINIMUM_DIRECTIVITY_WEIGHT, MAXIMUM_DIRECTIVITY_WEIGHT, OMNIDIRECTIONAL_DIRECTIVITY.weight),
+    sharpness: clampToRange(value.sharpness, MINIMUM_DIRECTIVITY_SHARPNESS, MAXIMUM_DIRECTIVITY_SHARPNESS, OMNIDIRECTIONAL_DIRECTIVITY.sharpness),
+  };
+}
+
+/** A file written before sources had a facing direction gets an omnidirectional one pointing along +x, which
+    reproduces exactly how it sounded when it was saved. */
+function migrateRoomSource(rawSource: RawRoomScene['source']): RoomSource {
+  return {
+    x: rawSource.x,
+    y: rawSource.y,
+    z: rawSource.z,
+    yawDegrees: normalizeYawDegrees(rawSource.yawDegrees),
+    directivity: migrateSourceDirectivity(rawSource.directivity),
+  };
+}
+
+function migrateRoomListener(rawListener: RawRoomScene['listener']): RoomListener {
+  const mode: ListenerMode = rawListener.mode === 'mono' ? 'mono' : 'binaural';
+  return { x: rawListener.x, y: rawListener.y, z: rawListener.z, yawDegrees: normalizeYawDegrees(rawListener.yawDegrees), mode };
 }

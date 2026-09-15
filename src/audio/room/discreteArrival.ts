@@ -1,4 +1,5 @@
 import type { FrequencyBandValues } from './roomTypes';
+import type { Vector3 } from './vector3';
 
 /**
  * One coherent sound path reaching the listener at a single, exact moment: the straight-line direct sound
@@ -18,7 +19,8 @@ import type { FrequencyBandValues } from './roomTypes';
 export interface DiscreteArrival {
   timeSeconds: number;
   energy: FrequencyBandValues;
-  /** Left/right position as heard from the listener (-1 fully left, +1 fully right, 0 centered) — see
-      `horizontalPanPosition` in `stereoPanning.ts`. */
-  panPosition: number;
+  /** Unit vector pointing from the listener out toward where this path arrives from, in world space. Kept as
+      a full direction rather than a left/right position so `listenerHeadModel.ts` can work out each ear's own
+      arrival time and shadowing from it — which needs to know front from back, not just side to side. */
+  directionFromListener: Vector3;
 }

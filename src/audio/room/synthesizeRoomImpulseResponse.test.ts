@@ -5,6 +5,7 @@ import { MAXIMUM_IMAGE_SOURCE_ORDER } from './roomAcousticsDefaults';
 import { synthesizeRoomImpulseResponse } from './synthesizeRoomImpulseResponse';
 import { DEFAULT_RAY_TRACING_PARAMS, type RayTracingParams } from './traceRays';
 import type { RoomBox, RoomScene } from './roomTypes';
+import { buildTestScene } from './testHelpers/buildTestRoomScene';
 
 const SAMPLE_RATE = 1000;
 const SPEED_OF_SOUND = 343;
@@ -55,8 +56,8 @@ describe('synthesizeRoomImpulseResponse', () => {
     // Source(5,0,0) and listener(8,0,0), 3m apart. Summed over a short window rather than read at one sample:
     // 3m is 8.75 samples at this rate, so the arrival genuinely falls between two samples and the band-split
     // kernel spreads it over a few more.
-    const scene: RoomScene = { boxes: [], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
-    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, buildParams(), false);
+    const scene: RoomScene = buildTestScene(buildTestScene({ boxes: [], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } }));
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, buildParams());
 
     const directArrival = computeDirectSoundArrival(scene, SPEED_OF_SOUND);
     const windowStart = Math.floor(directArrival.timeSeconds * SAMPLE_RATE) - 8;
@@ -69,7 +70,7 @@ describe('synthesizeRoomImpulseResponse', () => {
     // Source(5,0,0) -> the box's x=1 face -> listener(8,0,0): an 11m path arriving at ~32ms. The image-source
     // pass finds it exactly; the ray tracer deliberately leaves low-order specular paths alone so the same
     // echo is never counted twice.
-    const scene: RoomScene = { boxes: [buildObjectBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const scene: RoomScene = buildTestScene(buildTestScene({ boxes: [buildObjectBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } }));
     const params = buildParams();
 
     const [reflection] = computeImageSourceArrivals(scene, MAXIMUM_IMAGE_SOURCE_ORDER, SPEED_OF_SOUND, params.maximumDistanceMeters);
@@ -79,7 +80,7 @@ describe('synthesizeRoomImpulseResponse', () => {
     // Stereo simulation off here: this geometry's source and listener differ only along the left/right axis,
     // so an enabled stereo simulation would pan everything hard left and break the "identical on every
     // channel" assertion — panning is covered in its own test below.
-    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params, false);
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params);
 
     // FIXED_RANDOM_SOURCE zeroes out the noise tail, so anything non-zero here is the coherent tap itself.
     const windowStart = Math.floor(reflection.timeSeconds * SAMPLE_RATE) - 8;
@@ -93,33 +94,49 @@ describe('synthesizeRoomImpulseResponse', () => {
   test('the impulse response is only as long as the room needs, not a fixed length', () => {
     // An open scene has nothing to decay, so rendering seconds of silence for it is wasted work; a live room
     // needs every bit of its tail or it ends on an abrupt edge. One fixed length cannot serve both.
-    const openScene: RoomScene = { boxes: [], source: { x: 0, y: 1.5, z: 0 }, listener: { x: 2, y: 1.5, z: 0 } };
-    const liveRoom: RoomScene = {
-      boxes: [buildObjectBox({ x: -6, y: 0, z: -5, width: 12, height: 4, depth: 10, absorption: { low: 0.04, mid: 0.04, high: 0.05 } })],
-      source: { x: -2, y: 1.5, z: 0 },
-      listener: { x: 2, y: 1.5, z: 0 },
-    };
+    const openScene: RoomScene = buildTestScene(buildTestScene({ boxes: [], source: { x: 0, y: 1.5, z: 0 }, listener: { x: 2, y: 1.5, z: 0 } }));
+    const liveRoom: RoomScene = buildTestScene({ boxes: [buildObjectBox({ x: -6, y: 0, z: -5, width: 12, height: 4, depth: 10, absorption: { low: 0.04, mid: 0.04, high: 0.05 } })], source: { x: -2, y: 1.5, z: 0 }, listener: { x: 2, y: 1.5, z: 0 } });
 
     const params = buildParams({ numberOfRays: 512, maximumBounces: 200, randomSource: Math.random });
-    const [openChannel] = synthesizeRoomImpulseResponse(openScene, SAMPLE_RATE, params, false);
-    const [liveChannel] = synthesizeRoomImpulseResponse(liveRoom, SAMPLE_RATE, params, false);
+    const [openChannel] = synthesizeRoomImpulseResponse(openScene, SAMPLE_RATE, params);
+    const [liveChannel] = synthesizeRoomImpulseResponse(liveRoom, SAMPLE_RATE, params);
 
     expect(liveChannel.length).toBeGreaterThan(openChannel.length * 2);
   });
 
-  test('with stereo simulation enabled, a source placed hard left of the listener is heard louder on the left channel', () => {
-    // Source and listener differ only in x (the left/right axis — see TOP_VIEW_AXES in RoomEditor.tsx), with
-    // the source on the negative side, so both the direct path and the object's reflection arrive from the
-    // listener's left.
-    const scene: RoomScene = { boxes: [buildObjectBox({ x: 2 })], source: { x: -5, y: 0, z: 0 }, listener: { x: 0, y: 0, z: 0 } };
-    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, buildParams(), true);
+  test("a source to one side of the listener's head is heard louder on that ear", () => {
+    // The listener faces +x, so their right ear points along +z (see `YawDegrees`) and a source out along +z
+    // arrives from their right. Note this depends on how the listener is turned, not on any world axis —
+    // which is the whole point of giving them an orientation.
+    const scene: RoomScene = buildTestScene({
+      boxes: [buildObjectBox({ x: 2 })],
+      source: { x: 0, y: 0, z: 5 },
+      listener: { x: 0, y: 0, z: 0, mode: 'binaural', yawDegrees: 0 },
+    });
+    const [left, right] = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, buildParams());
 
-    expect(totalEnergy(channels[0])).toBeGreaterThan(totalEnergy(channels[1]));
+    expect(totalEnergy(right)).toBeGreaterThan(totalEnergy(left));
   });
 
-  test('with stereo simulation disabled, a source placed hard left of the listener is heard identically on every channel', () => {
-    const scene: RoomScene = { boxes: [buildObjectBox({ x: 2 })], source: { x: -5, y: 0, z: 0 }, listener: { x: 0, y: 0, z: 0 } };
-    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, buildParams(), false);
+  test('turning the listener to face the source centres it', () => {
+    const buildScene = (yawDegrees: number): RoomScene =>
+      buildTestScene({
+        boxes: [],
+        source: { x: 0, y: 0, z: 5 },
+        listener: { x: 0, y: 0, z: 0, mode: 'binaural', yawDegrees },
+      });
+
+    const [offToTheSideLeft, offToTheSideRight] = synthesizeRoomImpulseResponse(buildScene(0), SAMPLE_RATE, buildParams());
+    // Yaw 90 faces +z, straight at the source.
+    const [facingLeft, facingRight] = synthesizeRoomImpulseResponse(buildScene(90), SAMPLE_RATE, buildParams());
+
+    const imbalance = (left: Float32Array<ArrayBuffer>, right: Float32Array<ArrayBuffer>) => Math.abs(totalEnergy(left) - totalEnergy(right));
+    expect(imbalance(facingLeft, facingRight)).toBeLessThan(imbalance(offToTheSideLeft, offToTheSideRight));
+  });
+
+  test('a mono listener hears the same thing on both channels, wherever the source is', () => {
+    const scene: RoomScene = buildTestScene({ boxes: [buildObjectBox({ x: 2 })], source: { x: 0, y: 0, z: 5 }, listener: { x: 0, y: 0, z: 0 } });
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, buildParams());
 
     expect(totalEnergy(channels[0])).toBeCloseTo(totalEnergy(channels[1]));
   });

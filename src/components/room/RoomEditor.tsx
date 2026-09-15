@@ -1,26 +1,32 @@
-import type { JSX } from 'preact';
+import type { ComponentChildren, JSX } from 'preact';
 import { getRoomMaterialsInGroup, type RoomMaterialGroup } from '../../audio/room/roomMaterials';
 import type { RoomBox, RoomMaterialId } from '../../audio/room/roomTypes';
 import {
   activeRoomEditorTool,
   createBoxFromCanvasDrag,
-  listenerPosition,
   moveListenerOnAxes,
   moveSelectedBoxes,
   moveSourceOnAxes,
   removeSelectedBoxes,
   resizeBox,
   roomBoxes,
+  roomListener,
+  roomSource,
   selectBoxesInRect,
   selectedBoxIds,
   selectSingleBox,
   setActiveRoomEditorTool,
+  setListenerCoordinate,
+  setListenerMode,
+  setListenerYaw,
+  setSourceCoordinate,
+  setSourceDirectivityEnabled,
+  setSourceDirectivityNarrowness,
+  setSourceYaw,
   snapToAlignmentEnabled,
-  sourcePosition,
-  stereoSimulationEnabled,
+  sourceDirectivityNarrowness,
   toggleBoxSelection,
   toggleSnapToAlignment,
-  toggleStereoSimulation,
   updateSelectedBoxesAbsorptionBand,
   updateSelectedBoxesMaterial,
   updateSelectedBoxesTextureIntensity,
@@ -30,11 +36,23 @@ import { centimetersToMeters, metersToCentimeters } from '../../utils/unitConver
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
 import { SectionHeading } from '../ui/SectionHeading';
+import type { OrthographicAxes } from '../../audio/room/roomEditorGeometry';
 import { RoomOrthographicView, type RoomEditorTool } from './RoomOrthographicView';
 
-const TOP_VIEW_AXES = { horizontal: 'x', vertical: 'z' } as const;
-const FRONT_VIEW_AXES = { horizontal: 'x', vertical: 'y' } as const;
-const SIDE_VIEW_AXES = { horizontal: 'z', vertical: 'y' } as const;
+/** The three orthographic views, described once. Every handler a view needs follows from its axes, so
+    listing them as data keeps one view from drifting away from the others — they were three near-identical
+    fourteen-prop copies. */
+const ORTHOGRAPHIC_VIEWS = [
+  { label: 'Top', axes: { horizontal: 'x', vertical: 'z' }, horizontalAxisLabel: 'X', verticalAxisLabel: 'Z' },
+  { label: 'Front', axes: { horizontal: 'x', vertical: 'y' }, horizontalAxisLabel: 'X', verticalAxisLabel: 'Y' },
+  { label: 'Side', axes: { horizontal: 'z', vertical: 'y' }, horizontalAxisLabel: 'Z', verticalAxisLabel: 'Y' },
+] as const satisfies readonly { label: string; axes: OrthographicAxes; horizontalAxisLabel: string; verticalAxisLabel: string }[];
+
+const COORDINATE_AXES: { axis: 'x' | 'y' | 'z'; label: string }[] = [
+  { axis: 'x', label: 'X' },
+  { axis: 'y', label: 'Y (height)' },
+  { axis: 'z', label: 'Z' },
+];
 
 const TOOL_OPTIONS: { tool: RoomEditorTool; label: string }[] = [
   { tool: 'select', label: 'Select / move' },
@@ -115,18 +133,33 @@ function DistanceField({ label, meters, onChangeMeters }: { label: string; meter
 
 /** `value: null` renders as "Mixed" — used by the multi-select inspector when selected boxes' texture
     intensity differs. */
-function RangeField({ label, value, hint, onChange }: { label: string; value: number | null; hint?: string; onChange: (value: number) => void }) {
+function RangeField({
+  label,
+  value,
+  hint,
+  maximum = 2,
+  step = 0.1,
+  onChange,
+}: {
+  label: string;
+  value: number | null;
+  hint?: string;
+  maximum?: number;
+  step?: number;
+  onChange: (value: number) => void;
+}) {
   const handleInput = (event: JSX.TargetedEvent<HTMLInputElement>) => {
     onChange(Number(event.currentTarget.value));
   };
 
+  const decimalPlaces = step < 0.1 ? 2 : 1;
   return (
     <label class="flex flex-col gap-1 text-xs">
       <div class="flex items-center justify-between">
         <span class="text-text-tertiary">{label}</span>
-        <span class="font-mono text-[10px] text-text-tertiary">{value === null ? 'Mixed' : value.toFixed(1)}</span>
+        <span class="font-mono text-[10px] text-text-tertiary">{value === null ? 'Mixed' : value.toFixed(decimalPlaces)}</span>
       </div>
-      <input type="range" min={0} max={2} step={0.1} value={value ?? 1} onInput={handleInput} class="w-full accent-accent" />
+      <input type="range" min={0} max={maximum} step={step} value={value ?? 1} onInput={handleInput} class="w-full accent-accent" />
       {hint && <span class="text-[10px] text-text-tertiary">{hint}</span>}
     </label>
   );
@@ -269,9 +302,129 @@ function SelectedBoxInspector() {
   return <MultiBoxInspector boxes={selected} />;
 }
 
+/** Two mutually exclusive choices shown as a pair of buttons — used for the source's radiation pattern and
+    the listener's hearing, which are both genuinely binary and both worth showing rather than hiding behind a
+    dropdown. */
+function OptionToggle<Value extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: Value;
+  options: { value: Value; label: string }[];
+  onChange: (value: Value) => void;
+}) {
+  return (
+    <div class="flex flex-col gap-1 text-xs">
+      <span class="text-text-tertiary">{label}</span>
+      <div class="flex rounded-md border border-border-strong bg-surface-overlay p-0.5">
+        {options.map(option => (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => onChange(option.value)}
+            class={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+              option.value === value ? 'bg-accent text-surface-base' : 'text-text-secondary hover:text-text-primary'
+            }`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function YawField({ label, yawDegrees, onChange }: { label: string; yawDegrees: number; onChange: (yawDegrees: number) => void }) {
+  return <NumberField label={label} value={Math.round(yawDegrees)} step={5} unit="°" onChange={onChange} />;
+}
+
+function MarkerPanel({ title, accent, children }: { title: string; accent?: boolean; children: ComponentChildren }) {
+  return (
+    <div class="flex flex-col gap-3 rounded-lg border border-border-subtle bg-surface-overlay p-4">
+      <span class={`text-xs font-medium uppercase tracking-wide ${accent ? 'text-accent' : 'text-text-secondary'}`}>{title}</span>
+      {children}
+    </div>
+  );
+}
+
+function SourcePanel() {
+  const source = roomSource.value;
+
+  return (
+    <MarkerPanel title="Source" accent>
+      <div class="grid grid-cols-3 gap-3">
+        {COORDINATE_AXES.map(({ axis, label }) => (
+          <DistanceField key={axis} label={label} meters={source[axis]} onChangeMeters={meters => setSourceCoordinate(axis, meters)} />
+        ))}
+      </div>
+
+      <OptionToggle
+        label="Radiation"
+        value={source.directivity.enabled ? 'directional' : 'all-sided'}
+        options={[
+          { value: 'all-sided', label: 'All-sided' },
+          { value: 'directional', label: 'Directional' },
+        ]}
+        onChange={value => setSourceDirectivityEnabled(value === 'directional')}
+      />
+
+      {source.directivity.enabled && (
+        <>
+          <YawField label="Facing" yawDegrees={source.yawDegrees} onChange={setSourceYaw} />
+          <RangeField
+            label="Beam width"
+            value={sourceDirectivityNarrowness(source)}
+            maximum={1}
+            step={0.05}
+            hint="0 = radiates everywhere, 1 = a tight beam straight ahead"
+            onChange={setSourceDirectivityNarrowness}
+          />
+        </>
+      )}
+    </MarkerPanel>
+  );
+}
+
+function ListenerPanel() {
+  const listener = roomListener.value;
+
+  return (
+    <MarkerPanel title="Listener">
+      <div class="grid grid-cols-3 gap-3">
+        {COORDINATE_AXES.map(({ axis, label }) => (
+          <DistanceField key={axis} label={label} meters={listener[axis]} onChangeMeters={meters => setListenerCoordinate(axis, meters)} />
+        ))}
+      </div>
+
+      <OptionToggle
+        label="Hearing"
+        value={listener.mode}
+        options={[
+          { value: 'binaural', label: 'Two ears' },
+          { value: 'mono', label: 'Mono' },
+        ]}
+        onChange={setListenerMode}
+      />
+
+      {listener.mode === 'binaural' ? (
+        <YawField label="Facing" yawDegrees={listener.yawDegrees} onChange={setListenerYaw} />
+      ) : (
+        <p class="text-[10px] leading-relaxed text-text-tertiary">
+          A single omnidirectional capsule: both channels come out identical, and which way it points makes no difference.
+        </p>
+      )}
+    </MarkerPanel>
+  );
+}
+
 export function RoomEditor() {
   const boxes = roomBoxes.value;
   const activeTool = activeRoomEditorTool.value;
+  const source = roomSource.value;
+  const listener = roomListener.value;
 
   return (
     <Card class="flex flex-col gap-5">
@@ -281,7 +434,7 @@ export function RoomEditor() {
           description={
             <>
               Draw objects and absorbers, then place the <span class="text-accent">source</span> and{' '}
-              <span class="text-text-primary">listener</span> dots.
+              <span class="text-text-primary">listener</span>. Drag either one's arrow in the Top view to turn it.
             </>
           }
         />
@@ -295,73 +448,40 @@ export function RoomEditor() {
           <Button variant={snapToAlignmentEnabled.value ? 'primary' : 'secondary'} onClick={toggleSnapToAlignment}>
             Snap {snapToAlignmentEnabled.value ? 'on' : 'off'}
           </Button>
-          <Button variant={stereoSimulationEnabled.value ? 'primary' : 'secondary'} onClick={toggleStereoSimulation}>
-            Stereo sim {stereoSimulationEnabled.value ? 'on' : 'off'}
-          </Button>
         </div>
       </div>
 
       <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <RoomOrthographicView
-          label="Top"
-          horizontalAxisLabel="X"
-          verticalAxisLabel="Z"
-          axes={TOP_VIEW_AXES}
-          boxes={boxes}
-          selectedBoxIds={selectedBoxIds.value}
-          source={sourcePosition.value}
-          listener={listenerPosition.value}
-          activeTool={activeTool}
-          snapEnabled={snapToAlignmentEnabled.value}
-          onSelectBox={selectSingleBox}
-          onToggleBoxSelection={toggleBoxSelection}
-          onMarqueeSelect={selectBoxesInRect}
-          onMoveSelectedBoxes={(deltaHorizontal, deltaVertical) => moveSelectedBoxes(TOP_VIEW_AXES, deltaHorizontal, deltaVertical)}
-          onResizeBox={(boxId, handle, point) => resizeBox(boxId, TOP_VIEW_AXES, handle, point)}
-          onCreateBox={(start, end) => createBoxFromCanvasDrag(TOP_VIEW_AXES, start, end)}
-          onMoveSource={point => moveSourceOnAxes(TOP_VIEW_AXES, point)}
-          onMoveListener={point => moveListenerOnAxes(TOP_VIEW_AXES, point)}
-        />
-        <RoomOrthographicView
-          label="Front"
-          horizontalAxisLabel="X"
-          verticalAxisLabel="Y"
-          axes={FRONT_VIEW_AXES}
-          boxes={boxes}
-          selectedBoxIds={selectedBoxIds.value}
-          source={sourcePosition.value}
-          listener={listenerPosition.value}
-          activeTool={activeTool}
-          snapEnabled={snapToAlignmentEnabled.value}
-          onSelectBox={selectSingleBox}
-          onToggleBoxSelection={toggleBoxSelection}
-          onMarqueeSelect={selectBoxesInRect}
-          onMoveSelectedBoxes={(deltaHorizontal, deltaVertical) => moveSelectedBoxes(FRONT_VIEW_AXES, deltaHorizontal, deltaVertical)}
-          onResizeBox={(boxId, handle, point) => resizeBox(boxId, FRONT_VIEW_AXES, handle, point)}
-          onCreateBox={(start, end) => createBoxFromCanvasDrag(FRONT_VIEW_AXES, start, end)}
-          onMoveSource={point => moveSourceOnAxes(FRONT_VIEW_AXES, point)}
-          onMoveListener={point => moveListenerOnAxes(FRONT_VIEW_AXES, point)}
-        />
-        <RoomOrthographicView
-          label="Side"
-          horizontalAxisLabel="Z"
-          verticalAxisLabel="Y"
-          axes={SIDE_VIEW_AXES}
-          boxes={boxes}
-          selectedBoxIds={selectedBoxIds.value}
-          source={sourcePosition.value}
-          listener={listenerPosition.value}
-          activeTool={activeTool}
-          snapEnabled={snapToAlignmentEnabled.value}
-          onSelectBox={selectSingleBox}
-          onToggleBoxSelection={toggleBoxSelection}
-          onMarqueeSelect={selectBoxesInRect}
-          onMoveSelectedBoxes={(deltaHorizontal, deltaVertical) => moveSelectedBoxes(SIDE_VIEW_AXES, deltaHorizontal, deltaVertical)}
-          onResizeBox={(boxId, handle, point) => resizeBox(boxId, SIDE_VIEW_AXES, handle, point)}
-          onCreateBox={(start, end) => createBoxFromCanvasDrag(SIDE_VIEW_AXES, start, end)}
-          onMoveSource={point => moveSourceOnAxes(SIDE_VIEW_AXES, point)}
-          onMoveListener={point => moveListenerOnAxes(SIDE_VIEW_AXES, point)}
-        />
+        {ORTHOGRAPHIC_VIEWS.map(({ label, axes, horizontalAxisLabel, verticalAxisLabel }) => (
+          <RoomOrthographicView
+            key={label}
+            label={label}
+            horizontalAxisLabel={horizontalAxisLabel}
+            verticalAxisLabel={verticalAxisLabel}
+            axes={axes}
+            boxes={boxes}
+            selectedBoxIds={selectedBoxIds.value}
+            source={source}
+            listener={listener}
+            activeTool={activeTool}
+            snapEnabled={snapToAlignmentEnabled.value}
+            onSelectBox={selectSingleBox}
+            onToggleBoxSelection={toggleBoxSelection}
+            onMarqueeSelect={selectBoxesInRect}
+            onMoveSelectedBoxes={(deltaHorizontal, deltaVertical) => moveSelectedBoxes(axes, deltaHorizontal, deltaVertical)}
+            onResizeBox={(boxId, handle, point) => resizeBox(boxId, axes, handle, point)}
+            onCreateBox={(start, end) => createBoxFromCanvasDrag(axes, start, end)}
+            onMoveSource={point => moveSourceOnAxes(axes, point)}
+            onMoveListener={point => moveListenerOnAxes(axes, point)}
+            onRotateSource={setSourceYaw}
+            onRotateListener={setListenerYaw}
+          />
+        ))}
+      </div>
+
+      <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <SourcePanel />
+        <ListenerPanel />
       </div>
 
       <div class="rounded-lg border border-border-subtle bg-surface-overlay p-4">

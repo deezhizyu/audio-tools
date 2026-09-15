@@ -1,7 +1,8 @@
 import { buildBandImpulseKernel } from './bandSplitFilters';
 import type { DiscreteArrival } from './discreteArrival';
+import { computeEarResponse, EARS, toListenerLocalDirection } from './listenerHeadModel';
 import { addBandLimitedImpulse } from './renderBandLimitedImpulse';
-import { stereoPanWeightsFromPosition } from './stereoPanning';
+import type { RoomListener } from './roomTypes';
 
 /**
  * Adds every coherent arrival — the direct sound and each specular image-source echo — into the channels as
@@ -12,29 +13,35 @@ import { stereoPanWeightsFromPosition } from './stereoPanning';
  * single perceived event that simply sounds like it is in a room, rather than reading as separate noise
  * layered on top.
  *
- * Mutates `channels` in place. When `stereoSimulationEnabled` is on, each arrival is scaled per channel by
- * Steam Audio's constant-power stereo pan law (`stereoPanning.ts`) applied to its own `panPosition`, so an
- * echo coming in from one side of the listener favors that channel; when it's off, every arrival keeps full
- * amplitude on both channels.
+ * Each ear gets its own version of every arrival — its own arrival time and its own per-band level, from
+ * `listenerHeadModel.ts`. That is where the spatial impression actually comes from: the few hundred
+ * microseconds between one ear and the other, and how much of the top end the head blocks on the way to the
+ * far one. A mono listener collapses all of it and both channels come out identical.
+ *
+ * Mutates `channels` in place.
  */
 export function renderDiscreteArrivals(
   channels: Float32Array<ArrayBuffer>[],
   arrivals: DiscreteArrival[],
   sampleRate: number,
-  stereoSimulationEnabled: boolean,
+  listener: RoomListener,
 ): void {
   const kernel = buildBandImpulseKernel(sampleRate);
 
   for (const arrival of arrivals) {
-    const panWeights = stereoSimulationEnabled ? stereoPanWeightsFromPosition(arrival.panPosition) : { left: 1, right: 1 };
-    const orderedPanWeights = [panWeights.left, panWeights.right];
+    const local = toListenerLocalDirection(arrival.directionFromListener, listener);
 
     channels.forEach((channel, channelIndex) => {
-      const channelPanWeight = orderedPanWeights[Math.min(channelIndex, orderedPanWeights.length - 1)];
-      addBandLimitedImpulse(channel, arrival.timeSeconds, sampleRate, kernel, {
-        low: channelPanWeight * Math.sqrt(arrival.energy.low),
-        mid: channelPanWeight * Math.sqrt(arrival.energy.mid),
-        high: channelPanWeight * Math.sqrt(arrival.energy.high),
+      const ear = EARS[Math.min(channelIndex, EARS.length - 1)];
+      const { delaySeconds, gains } = computeEarResponse(local, ear, listener);
+      // Floored at zero: the nearer ear's offset is negative, and a source almost on top of the listener can
+      // in principle push the arrival before time zero, where it would simply be dropped.
+      const earDelaySeconds = Math.max(0, arrival.timeSeconds + delaySeconds);
+
+      addBandLimitedImpulse(channel, earDelaySeconds, sampleRate, kernel, {
+        low: Math.sqrt(arrival.energy.low * gains.low),
+        mid: Math.sqrt(arrival.energy.mid * gains.mid),
+        high: Math.sqrt(arrival.energy.high * gains.high),
       });
     });
   }

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import { MAXIMUM_IMAGE_SOURCE_ORDER } from './roomAcousticsDefaults';
 import { traceRays, type RayTracingParams } from './traceRays';
 import type { RoomBox, RoomMaterialId, RoomScene } from './roomTypes';
+import { buildTestScene } from './testHelpers/buildTestRoomScene';
 
 /** Always returns 0.5, so every `randomUnitVector` call in `traceRays.ts` resolves to the same direction
     (approximately -x) and every test run is fully deterministic. */
@@ -43,17 +44,18 @@ describe('traceRays', () => {
   test('a reflection off an object arrives with the total bounce distance, not the straight-line distance', () => {
     // Ray travels from source (x=5) in -x, hits the object at x=1, and has a clear shadow-ray path back to the
     // listener behind the source: source -> hit is 4m, hit -> listener is 7m.
-    const scene: RoomScene = { boxes: [buildObjectBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const scene: RoomScene = buildTestScene({ boxes: [buildObjectBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } });
     const arrivals = traceRays(scene, buildParams());
 
     expect(arrivals).toHaveLength(1);
     expect(arrivals[0].timeSeconds).toBeCloseTo(11 / 343, 5);
-    // The reflection point (around x=1) sits to the left of the listener (x=8) along the left/right axis.
-    expect(arrivals[0].panPosition).toBeLessThan(0);
+    // The listener faces +x, so their right ear is toward +z; the reflection point (around x=1) is directly
+    // behind them, neither left nor right.
+    expect(arrivals[0].lateralPosition).toBeCloseTo(0);
   });
 
   test('an absorber ends the ray immediately, contributing no reflection arrival', () => {
-    const scene: RoomScene = { boxes: [buildObjectBox({ kind: 'absorber', materialId: 'generic-absorber' })], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const scene: RoomScene = buildTestScene({ boxes: [buildObjectBox({ kind: 'absorber', materialId: 'generic-absorber' })], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } });
     const arrivals = traceRays(scene, buildParams());
     expect(arrivals).toHaveLength(0);
   });
@@ -63,7 +65,7 @@ describe('traceRays', () => {
     // path (x from 5 down to 1) but sits squarely between the reflection point and the listener at x=10,
     // blocking the next-event-estimation shadow ray.
     const blockingObject = buildObjectBox({ x: 6, width: 1 });
-    const scene: RoomScene = { boxes: [buildObjectBox(), blockingObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 10, y: 0, z: 0 } };
+    const scene: RoomScene = buildTestScene({ boxes: [buildObjectBox(), blockingObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 10, y: 0, z: 0 } });
     const arrivals = traceRays(scene, buildParams());
     expect(arrivals).toHaveLength(0);
   });
@@ -73,7 +75,7 @@ describe('traceRays', () => {
     // object slabs. The ray (heading -x) must reflect off the box's inner surface at x=-10 and travel back to
     // the listener — if the box were still only hit-testable from outside, this would report zero arrivals.
     const enclosingRoom = buildObjectBox({ x: -10, y: -10, z: -10, width: 20, height: 20, depth: 20 });
-    const scene: RoomScene = { boxes: [enclosingRoom], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const scene: RoomScene = buildTestScene({ boxes: [enclosingRoom], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } });
     const arrivals = traceRays(scene, buildParams());
 
     expect(arrivals).toHaveLength(1);
@@ -88,7 +90,7 @@ describe('traceRays', () => {
     // headed. Here the only object is well off the ray's path (it travels along y=0, z=0; the object sits
     // entirely outside that line), so the ray never hits anything, and a close listener must not change that.
     const farOffAxisObject = buildObjectBox({ x: -50, y: 40, z: 40, width: 2, height: 2, depth: 2 });
-    const scene: RoomScene = { boxes: [farOffAxisObject], source: { x: 0, y: 0, z: 0 }, listener: { x: 0.1, y: 0, z: 0 } };
+    const scene: RoomScene = buildTestScene({ boxes: [farOffAxisObject], source: { x: 0, y: 0, z: 0 }, listener: { x: 0.1, y: 0, z: 0 } });
     const arrivals = traceRays(scene, buildParams());
     expect(arrivals).toHaveLength(0);
   });
@@ -103,8 +105,8 @@ describe('traceRays', () => {
     const smoothObject = buildObjectBox({ materialId: 'smooth-metal' });
     const roughObject = buildObjectBox({ materialId: 'grass' });
 
-    const smoothResult = traceRays({ boxes: [smoothObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } }, buildParams());
-    const roughResult = traceRays({ boxes: [roughObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } }, buildParams());
+    const smoothResult = traceRays(buildTestScene({ boxes: [smoothObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } }), buildParams());
+    const roughResult = traceRays(buildTestScene({ boxes: [roughObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } }), buildParams());
 
     expect(smoothResult).toHaveLength(1);
     expect(roughResult).toHaveLength(1);
@@ -121,7 +123,7 @@ describe('traceRays', () => {
     // claiming the same echo.
     const smoothObject = buildObjectBox({ materialId: 'smooth-metal' });
     const roughObject = buildObjectBox({ materialId: 'grass' });
-    const buildScene = (box: RoomBox): RoomScene => ({ boxes: [box], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } });
+    const buildScene = (box: RoomBox): RoomScene => (buildTestScene({ boxes: [box], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } }));
 
     const [smoothArrival] = traceRays(buildScene(smoothObject), buildParams());
     const [roughArrival] = traceRays(buildScene(roughObject), buildParams());
@@ -135,7 +137,7 @@ describe('traceRays', () => {
     // forth between the enclosing room's inner faces, and the listener sits on that line — so every bounce is
     // aimed squarely at it and a counted specular lobe is unmistakable against a diffuse-only one.
     const enclosingRoom = buildObjectBox({ x: -10, y: -10, z: -10, width: 20, height: 20, depth: 20, materialId: 'smooth-metal' });
-    const scene: RoomScene = { boxes: [enclosingRoom], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const scene: RoomScene = buildTestScene({ boxes: [enclosingRoom], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } });
     const arrivals = traceRays(scene, buildParams({ maximumBounces: MAXIMUM_IMAGE_SOURCE_ORDER + 1 }));
 
     expect(arrivals).toHaveLength(MAXIMUM_IMAGE_SOURCE_ORDER + 1);
@@ -151,7 +153,7 @@ describe('traceRays', () => {
     // surface at x=-10 first, reflects to essentially exactly +x, then hits the opposite inner surface at
     // x=10 — two distinct bounces, both with a clear shadow-ray path to the listener at x=8.
     const enclosingRoom = buildObjectBox({ x: -10, y: -10, z: -10, width: 20, height: 20, depth: 20 });
-    const scene: RoomScene = { boxes: [enclosingRoom], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const scene: RoomScene = buildTestScene({ boxes: [enclosingRoom], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } });
 
     expect(traceRays(scene, buildParams({ maximumBounces: 1 }))).toHaveLength(1);
     expect(traceRays(scene, buildParams({ maximumBounces: 2 }))).toHaveLength(2);
@@ -162,8 +164,8 @@ describe('traceRays', () => {
     // *ratio* (rather than either band in isolation) cancels out the geometric 1/distance² and material
     // absorption terms, which apply identically to every band, isolating air absorption's frequency-dependent
     // effect (see `airAbsorption.ts`).
-    const nearScene: RoomScene = { boxes: [buildObjectBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
-    const farScene: RoomScene = { boxes: [buildObjectBox({ x: -50, width: 2 })], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const nearScene: RoomScene = buildTestScene({ boxes: [buildObjectBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } });
+    const farScene: RoomScene = buildTestScene({ boxes: [buildObjectBox({ x: -50, width: 2 })], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } });
 
     const [nearArrival] = traceRays(nearScene, buildParams());
     const [farArrival] = traceRays(farScene, buildParams());
@@ -190,7 +192,7 @@ describe('traceRays', () => {
 
     const totalLowEnergy = (materialId: RoomMaterialId): number => {
       const room = buildObjectBox({ materialId, x: -2.4, y: 0, z: -2.09, width: 4.8, height: 2.5, depth: 4.17 });
-      const scene: RoomScene = { boxes: [room], source: { x: -0.8, y: 1.2, z: 0 }, listener: { x: 0.5, y: 1.2, z: 0 } };
+      const scene: RoomScene = buildTestScene({ boxes: [room], source: { x: -0.8, y: 1.2, z: 0 }, listener: { x: 0.5, y: 1.2, z: 0 } });
       const params = buildParams({ numberOfRays: 300, maximumBounces: 20, randomSource: seededRandom(42) });
       return traceRays(scene, params).reduce((sum, arrival) => sum + arrival.energy.low, 0);
     };

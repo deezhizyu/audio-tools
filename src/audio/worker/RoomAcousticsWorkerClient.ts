@@ -37,9 +37,9 @@ export class RoomAcousticsWorkerClient {
     });
   }
 
-  async simulate(scene: RoomScene, sampleRate: number, stereoSimulationEnabled: boolean, quality: SimulationQuality): Promise<SimulateRoomResult> {
+  async simulate(scene: RoomScene, sampleRate: number, quality: SimulationQuality): Promise<SimulateRoomResult> {
     const requestId = this.nextRequestId++;
-    const response = await this.sendRequest({ type: 'simulate', requestId, scene, sampleRate, stereoSimulationEnabled, quality });
+    const response = await this.sendRequest({ type: 'simulate', requestId, scene, sampleRate, quality });
     if (response.type !== 'simulate') throw new Error('Unexpected response to simulate.');
     return { impulseResponseChannelData: response.impulseResponseChannelData, sampleRate: response.sampleRate };
   }

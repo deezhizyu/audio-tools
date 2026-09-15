@@ -1,12 +1,15 @@
 import { createOnePoleLowpassFilter, HIGH_BAND_CUTOFF_HERTZ, LOW_BAND_CUTOFF_HERTZ } from './bandSplitFilters';
 import type { EnergyHistogram } from './buildEnergyHistogram';
-import { stereoPanWeightsFromPosition } from './stereoPanning';
+import { computeDiffuseEarGains, EARS, interauralCoherence } from './listenerHeadModel';
+import type { FrequencyBandValues, RoomListener } from './roomTypes';
 
 interface BandLimitedNoiseTracks {
   low: Float32Array;
   mid: Float32Array;
   high: Float32Array;
 }
+
+const BAND_NAMES = ['low', 'mid', 'high'] as const;
 
 /** Scales a signal so its mean square is exactly 1, i.e. each sample carries an average energy of 1. */
 function normalizeToUnitMeanSquare(track: Float32Array): void {
@@ -34,8 +37,8 @@ function removeComponentAlong(track: Float32Array, basis: Float32Array): void {
 }
 
 /**
- * Makes the three band tracks mutually independent, then rescales them so their energies still add up to the
- * white noise's.
+ * Makes the three band tracks mutually independent, then rescales them so their energies add up to one unit
+ * per sample.
  *
  * The one-pole filters the bands are split with roll off gently, so neighboring bands genuinely share content
  * and their energies do not add: scaled independently, they interfere, and a bin renders up to about 1.2dB
@@ -62,24 +65,20 @@ function orthogonalizeBandTracks({ low, mid, high }: BandLimitedNoiseTracks): vo
 }
 
 /**
- * Splits one shared white-noise source into three bands via the "difference of lowpass filters" technique:
- * a low band and a separately-cutoff low band are each lowpassed from the same noise, the low band is used
- * as-is, the high band is what a high lowpass removes from the raw noise, and the mid band is whatever falls
- * between the two lowpass outputs. Cheap (two one-pole filters, no FFT) and enough to give the synthesized
- * tail believable frequency-dependent decay.
+ * Splits one white-noise source into three bands via the "difference of lowpass filters" technique: a low
+ * band and a separately-cutoff low band are each lowpassed from the same noise, the low band is used as-is,
+ * the high band is what a high lowpass removes from the raw noise, and the mid band is whatever falls between
+ * the two lowpass outputs. Cheap (two one-pole filters, no FFT) and enough to give the synthesized tail
+ * believable frequency-dependent decay.
  *
- * That the three tracks come from one *shared* source is what makes the energy bookkeeping work. Each band's
- * share of the total energy is then its share of the spectrum, so a band covering a tenth of the audible
- * range carries a tenth of the energy — and a flat three-band energy spectrum renders as one flat broadband
- * signal rather than as three stacked copies of it. The bands' very different variances are that bandwidth,
- * not an accident to be corrected: normalizing each band to the same level (or drawing them from independent
- * noise) would make a flat spectrum come out roughly three times too loud, and mis-weight every other one.
- *
- * The white noise is normalized to unit mean square before splitting, and the bands are left mutually
- * independent afterwards (see `orthogonalizeBandTracks`), so a band amplitude in
- * `computeChannelAmplitudePerBin` is a plain square root of the energy that band should carry.
+ * That the three tracks come from one shared source is what makes the energy bookkeeping work. Each band's
+ * share of the total energy is its share of the spectrum, so a band covering a tenth of the audible range
+ * carries a tenth of the energy — and a flat three-band energy spectrum renders as one flat broadband signal
+ * rather than as three stacked copies of it. The bands' very different variances are that bandwidth, not an
+ * accident to be corrected: normalizing each band to the same level would make a flat spectrum come out
+ * roughly three times too loud, and mis-weight every other one.
  */
-function synthesizeBandLimitedNoiseTracks(sampleCount: number, sampleRate: number, randomSource: () => number): BandLimitedNoiseTracks {
+function splitWhiteNoiseIntoBands(sampleCount: number, sampleRate: number, randomSource: () => number): BandLimitedNoiseTracks {
   const whiteNoise = new Float32Array(sampleCount);
   for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++) whiteNoise[sampleIndex] = randomSource() * 2 - 1;
   normalizeToUnitMeanSquare(whiteNoise);
@@ -101,52 +100,82 @@ function synthesizeBandLimitedNoiseTracks(sampleCount: number, sampleRate: numbe
     high[sampleIndex] = whiteNoiseSample - highLowpassValue;
   }
 
-  const tracks = { low, mid, high };
-  orthogonalizeBandTracks(tracks);
-  return tracks;
+  return { low, mid, high };
 }
 
 /**
- * One channel's per-bin, per-band sample amplitude: the square root of the energy each sample in that bin
- * should carry, times that bin's left/right weight.
+ * One ear's noise: a blend of the realization shared with the other ear and one drawn only for this one,
+ * weighted per band by how alike the two ears' signals should be (`interauralCoherence`). The weights are
+ * `γ` and `√(1 - γ²)`, which reproduces exactly that correlation while leaving the level untouched.
+ *
+ * Reverberation is not equally decorrelated at every frequency. Below a few hundred hertz the wavelength
+ * dwarfs the head and both ears receive nearly the same pressure, which is why bass in a real room sounds
+ * solid and placed; by the top of the spectrum the two ears are effectively independent. Building both
+ * channels from entirely separate noise — which is what this used to do — throws the low end's coherence away
+ * and leaves the bottom of every room sounding phasey and hollow. A mono listener sits at the other extreme,
+ * fully coherent at every frequency, so both channels come out identical.
+ */
+function buildEarNoiseTracks(
+  sharedTracks: BandLimitedNoiseTracks,
+  sampleCount: number,
+  sampleRate: number,
+  randomSource: () => number,
+  coherence: FrequencyBandValues,
+): BandLimitedNoiseTracks {
+  const independentTracks = splitWhiteNoiseIntoBands(sampleCount, sampleRate, randomSource);
+
+  for (const band of BAND_NAMES) {
+    const sharedWeight = coherence[band];
+    const independentWeight = Math.sqrt(Math.max(0, 1 - sharedWeight * sharedWeight));
+    const shared = sharedTracks[band];
+    const independent = independentTracks[band];
+    for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++) {
+      independent[sampleIndex] = sharedWeight * shared[sampleIndex] + independentWeight * independent[sampleIndex];
+    }
+  }
+
+  orthogonalizeBandTracks(independentTracks);
+  return independentTracks;
+}
+
+/**
+ * One ear's per-bin, per-band sample amplitude: the square root of the energy each sample in that bin should
+ * carry at that ear.
  *
  * Dividing the bin's energy by how many samples it spans is the step that makes the tail's level physically
- * meaningful. A bin holds a total energy, and the shared noise it scales delivers one unit of energy per
- * sample across all three bands together, so spreading that total over `samplesPerBin` samples requires
- * exactly this. Writing `sqrt(binEnergy)` per
- * sample instead — what this pipeline used to do — hands every bin `samplesPerBin` times its own energy,
- * which at 48kHz and 5ms bins is a factor of 240: the diffuse tail came out roughly 19dB louder than the
- * early reflections it is supposed to be a seamless continuation of.
+ * meaningful. A bin holds a total energy, and the noise it scales delivers one unit of energy per sample
+ * across all three bands together, so spreading that total over `samplesPerBin` samples requires exactly
+ * this. Writing `sqrt(binEnergy)` per sample instead — what this pipeline used to do — hands every bin
+ * `samplesPerBin` times its own energy, which at 48kHz and 5ms bins is a factor of 240: the diffuse tail came
+ * out roughly 19dB louder than the early reflections it is supposed to be a seamless continuation of.
  *
- * The stereo weights are folded in here rather than applied afterwards so that they get interpolated along
- * with everything else, and a moving stereo image doesn't step from bin to bin.
+ * The head's shadowing is folded in here rather than applied afterwards so that it gets interpolated along
+ * with everything else, and a tail whose direction drifts over time doesn't step from bin to bin.
  */
-function computeChannelAmplitudePerBin(
+function computeEarAmplitudePerBin(
   histogram: EnergyHistogram,
   samplesPerBin: number,
-  stereoSimulationEnabled: boolean,
+  listener: RoomListener,
   channelIndex: number,
 ): BandLimitedNoiseTracks {
   const binCount = histogram.low.length;
-  const low = new Float32Array(binCount);
-  const mid = new Float32Array(binCount);
-  const high = new Float32Array(binCount);
+  const ear = EARS[Math.min(channelIndex, EARS.length - 1)];
+  const amplitudes = { low: new Float32Array(binCount), mid: new Float32Array(binCount), high: new Float32Array(binCount) };
 
   for (let binIndex = 0; binIndex < binCount; binIndex++) {
-    const weights = stereoSimulationEnabled ? stereoPanWeightsFromPosition(histogram.pan[binIndex]) : { left: 1, right: 1 };
-    const channelWeight = channelIndex === 0 ? weights.left : weights.right;
-    low[binIndex] = channelWeight * Math.sqrt(histogram.low[binIndex] / samplesPerBin);
-    mid[binIndex] = channelWeight * Math.sqrt(histogram.mid[binIndex] / samplesPerBin);
-    high[binIndex] = channelWeight * Math.sqrt(histogram.high[binIndex] / samplesPerBin);
+    const gains = computeDiffuseEarGains(histogram.lateralPosition[binIndex], ear, listener);
+    for (const band of BAND_NAMES) {
+      amplitudes[band][binIndex] = Math.sqrt((histogram[band][binIndex] * gains[band]) / samplesPerBin);
+    }
   }
 
-  return { low, mid, high };
+  return amplitudes;
 }
 
 /** Builds one channel's waveform by scaling band-limited noise with the per-bin amplitudes, linearly
     interpolated between neighboring bin centers. The interpolation matters: reading one bin's value flat
     across all of its samples (what this used to do) makes the decay envelope a staircase, stepping every
-    5ms — an audible 200Hz buzz riding on the tail that has nothing to do with the room. */
+    5ms — an audible buzz riding on the tail that has nothing to do with the room. */
 function buildChannelImpulseResponse(
   amplitudePerBin: BandLimitedNoiseTracks,
   sampleCount: number,
@@ -189,28 +218,25 @@ function buildChannelImpulseResponse(
  * response comes out with is the one the room's geometry and materials actually imply — the quantity that
  * decides whether a space sounds close or distant.
  *
- * The two channels are built from independently drawn noise realizations of the same histogram envelope —
- * real reflections reach each ear decorrelated, and rendering both channels from one shared noise signal (as
- * a single mono impulse response convolved identically into every output channel would) makes reflections
- * read as glued to the direct sound rather than spatially separate from it, which is what made even a single,
- * physically correct reflection sound like a small enclosed space instead of open air. When
- * `stereoSimulationEnabled` is on, each bin is additionally panned left/right via Steam Audio's
- * constant-power stereo pan law (`stereoPanning.ts`), giving the tail a real interaural level difference
- * instead of only decorrelated noise; when it's off, every bin keeps full amplitude on both channels.
+ * The two channels differ in two ways, both taken from the listener's head (`listenerHeadModel.ts`): how
+ * alike their noise is, band by band, and how much of the tail's average direction each ear is shadowed from.
  */
 export function synthesizeImpulseResponseFromHistogram(
   histogram: EnergyHistogram,
   sampleRate: number,
-  stereoSimulationEnabled: boolean,
+  listener: RoomListener,
   randomSource: () => number = Math.random,
 ): Float32Array<ArrayBuffer>[] {
   const totalDurationSeconds = histogram.low.length * histogram.binDurationSeconds;
   const sampleCount = Math.max(1, Math.round(totalDurationSeconds * sampleRate));
   const samplesPerBin = Math.max(1, Math.round(histogram.binDurationSeconds * sampleRate));
 
-  return [0, 1].map(channelIndex => {
-    const amplitudePerBin = computeChannelAmplitudePerBin(histogram, samplesPerBin, stereoSimulationEnabled, channelIndex);
-    const noiseTracks = synthesizeBandLimitedNoiseTracks(sampleCount, sampleRate, randomSource);
+  const sharedTracks = splitWhiteNoiseIntoBands(sampleCount, sampleRate, randomSource);
+  const coherence = interauralCoherence(listener);
+
+  return EARS.map((_ear, channelIndex) => {
+    const noiseTracks = buildEarNoiseTracks(sharedTracks, sampleCount, sampleRate, randomSource, coherence);
+    const amplitudePerBin = computeEarAmplitudePerBin(histogram, samplesPerBin, listener, channelIndex);
     return buildChannelImpulseResponse(amplitudePerBin, sampleCount, samplesPerBin, noiseTracks);
   });
 }

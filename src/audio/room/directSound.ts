@@ -4,8 +4,8 @@ import { isSegmentUnobstructed } from './lineOfSight';
 import { MINIMUM_CONTRIBUTION_DISTANCE_METERS } from './roomAcousticsDefaults';
 import { toAxisAlignedBox } from './roomBoxGeometry';
 import type { FrequencyBandValues, RoomScene } from './roomTypes';
-import { horizontalPanPosition } from './stereoPanning';
-import { buildOrthonormalBasis, distanceBetweenPoints, normalizeVector, type Vector3 } from './vector3';
+import { directivityGain } from './sourceDirectivity';
+import { buildOrthonormalBasis, distanceBetweenPoints, normalizeVector, scaleVector, type Vector3 } from './vector3';
 
 const COINCIDENT_POINT_EPSILON_METERS = 1e-6;
 
@@ -81,7 +81,9 @@ function applyOcclusion(energy: FrequencyBandValues, visibleFraction: number): F
  *
  * Air absorption is applied here, not only to reflections: without it a source 50 meters away across an open
  * field arrives exactly as bright as one a meter away, which is the single most obvious thing wrong with a
- * distant outdoor sound.
+ * distant outdoor sound. The source's own directivity applies too, so aiming a directional source away from
+ * the listener dulls and quietens what reaches them directly while leaving the room's reverb alone — which is
+ * exactly what happens when someone turns their head away mid-sentence.
  */
 export function computeDirectSoundArrival(scene: RoomScene, speedOfSoundMetersPerSecond: number): DiscreteArrival {
   const distanceMeters = distanceBetweenPoints(scene.source, scene.listener);
@@ -89,7 +91,7 @@ export function computeDirectSoundArrival(scene: RoomScene, speedOfSoundMetersPe
   const spreading = spreadingEnergy(distanceMeters);
 
   if (distanceMeters < COINCIDENT_POINT_EPSILON_METERS) {
-    return { timeSeconds, energy: { low: spreading, mid: spreading, high: spreading }, panPosition: 0 };
+    return { timeSeconds, energy: { low: spreading, mid: spreading, high: spreading }, directionFromListener: { x: 1, y: 0, z: 0 } };
   }
 
   const direction = normalizeVector({
@@ -98,11 +100,10 @@ export function computeDirectSoundArrival(scene: RoomScene, speedOfSoundMetersPe
     z: scene.listener.z - scene.source.z,
   });
 
-  const spreadAndAbsorbed = applyAirAbsorption({ low: spreading, mid: spreading, high: spreading }, distanceMeters);
+  const radiated = spreading * directivityGain(scene.source, direction);
+  const spreadAndAbsorbed = applyAirAbsorption({ low: radiated, mid: radiated, high: radiated }, distanceMeters);
   const energy = applyOcclusion(spreadAndAbsorbed, computeVisibleFraction(scene, direction, distanceMeters));
 
   // The source is heard from the listener along the reverse of `direction` (which points listener-ward).
-  const panPosition = horizontalPanPosition({ x: -direction.x, y: -direction.y, z: -direction.z });
-
-  return { timeSeconds, energy, panPosition };
+  return { timeSeconds, energy, directionFromListener: scaleVector(direction, -1) };
 }

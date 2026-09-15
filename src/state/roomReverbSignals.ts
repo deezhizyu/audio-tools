@@ -16,7 +16,14 @@ import {
 } from '../audio/room/roomEditorGeometry';
 import { parseRoomScene, serializeRoomScene } from '../audio/room/roomFileFormat';
 import { DEFAULT_ABSORBER_MATERIAL_ID, DEFAULT_OBJECT_MATERIAL_ID, getRoomMaterial } from '../audio/room/roomMaterials';
-import type { RoomBox, RoomBoxKind, RoomMaterialId, RoomPoint3D, RoomScene } from '../audio/room/roomTypes';
+import type { ListenerMode, RoomBox, RoomBoxKind, RoomListener, RoomMaterialId, RoomSource, RoomScene } from '../audio/room/roomTypes';
+import {
+  MAXIMUM_DIRECTIVITY_SHARPNESS,
+  MAXIMUM_DIRECTIVITY_WEIGHT,
+  MINIMUM_DIRECTIVITY_SHARPNESS,
+  MINIMUM_DIRECTIVITY_WEIGHT,
+  OMNIDIRECTIONAL_DIRECTIVITY,
+} from '../audio/room/sourceDirectivity';
 import { SimpleAudioPlaybackController } from '../audio/SimpleAudioPlaybackController';
 import type { ExportAudioFormat } from '../audio/types';
 import { RoomAcousticsWorkerClient } from '../audio/worker/RoomAcousticsWorkerClient';
@@ -35,20 +42,15 @@ const RESIMULATE_DEBOUNCE_MILLISECONDS = 250;
 //     to (and never does) reset these. -------------------------------------------------------------------
 
 export const roomBoxes = signal<RoomBox[]>([]);
-export const sourcePosition = signal<RoomPoint3D>({ x: -2, y: 1.5, z: 0 });
-export const listenerPosition = signal<RoomPoint3D>({ x: 2, y: 1.5, z: 0 });
+export const roomSource = signal<RoomSource>({ x: -2, y: 1.5, z: 0, yawDegrees: 0, directivity: OMNIDIRECTIONAL_DIRECTIVITY });
+export const roomListener = signal<RoomListener>({ x: 2, y: 1.5, z: 0, yawDegrees: 180, mode: 'binaural' });
 export const selectedBoxIds = signal<ReadonlySet<string>>(new Set());
 export const activeRoomEditorTool = signal<RoomEditorTool>('select');
 /** Whether dragging a box/source/listener snaps to nearby object edges, their centers, and the origin axes
     (see `computeBoxMoveSnapOffset`/`snapPointToCandidates` in `roomEditorGeometry.ts`). Purely an editor
     convenience — it never affects the drawn room's saved geometry beyond where a drag happens to land. */
 export const snapToAlignmentEnabled = signal(true);
-/** Whether reflections are panned left/right by direction (Steam Audio's constant-power stereo pan law — see
-    `stereoPanning.ts`) instead of landing centered on both channels. On by default: it's what makes a room
-    with a source and listener on opposite sides actually sound like it has a left and a right. Editor-only,
-    like `snapToAlignmentEnabled` — it's not part of a saved room's geometry, so it isn't serialized by
-    `saveRoomToFile`/`importRoomFromFile`. */
-export const stereoSimulationEnabled = signal(true);
+
 
 // --- Audio signals — independent of the drawn room, so loading/replacing a file never touches the signals
 //     above. -----------------------------------------------------------------------------------------------
@@ -103,7 +105,7 @@ let lastLivePlaybackUpdateAtMilliseconds = 0;
 let pendingLivePlaybackUpdateTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
 function currentScene(): RoomScene {
-  return { boxes: roomBoxes.value, source: sourcePosition.value, listener: listenerPosition.value };
+  return { boxes: roomBoxes.value, source: roomSource.value, listener: roomListener.value };
 }
 
 /** Runs a fast, rough `INTERACTIVE_RAY_TRACING_PARAMS` pass immediately on every edit — this, not the
@@ -225,7 +227,7 @@ async function runSimulation(quality: SimulationQuality): Promise<void> {
 
   try {
     if (!activeWorkerClient) activeWorkerClient = new RoomAcousticsWorkerClient();
-    const { impulseResponseChannelData } = await activeWorkerClient.simulate(currentScene(), drySampleRate, stereoSimulationEnabled.value, quality);
+    const { impulseResponseChannelData } = await activeWorkerClient.simulate(currentScene(), drySampleRate, quality);
     if (requestToken !== resimulateRequestToken) return;
 
     latestImpulseResponseChannelData = impulseResponseChannelData;
@@ -340,9 +342,35 @@ export function toggleSnapToAlignment(): void {
   snapToAlignmentEnabled.value = !snapToAlignmentEnabled.value;
 }
 
-export function toggleStereoSimulation(): void {
-  stereoSimulationEnabled.value = !stereoSimulationEnabled.value;
+export function setListenerMode(mode: ListenerMode): void {
+  roomListener.value = { ...roomListener.value, mode };
   scheduleResimulate();
+}
+
+export function setSourceDirectivityEnabled(enabled: boolean): void {
+  roomSource.value = { ...roomSource.value, directivity: { ...roomSource.value.directivity, enabled } };
+  scheduleResimulate();
+}
+
+/** One slider drives both of the dipole model's parameters (see `SourceDirectivity`): 0 is omnidirectional
+    and 1 is as tight a beam as the model offers, with a cardioid sitting around the middle. Exposing
+    `weight` and `sharpness` separately would be two controls for one perceptual quantity — how narrowly the
+    source is aimed — and neither is meaningful on its own. */
+export function setSourceDirectivityNarrowness(narrowness: number): void {
+  const clamped = Math.min(1, Math.max(0, narrowness));
+  roomSource.value = {
+    ...roomSource.value,
+    directivity: {
+      ...roomSource.value.directivity,
+      weight: MINIMUM_DIRECTIVITY_WEIGHT + clamped * (MAXIMUM_DIRECTIVITY_WEIGHT - MINIMUM_DIRECTIVITY_WEIGHT),
+      sharpness: MINIMUM_DIRECTIVITY_SHARPNESS + clamped * (MAXIMUM_DIRECTIVITY_SHARPNESS - MINIMUM_DIRECTIVITY_SHARPNESS),
+    },
+  };
+  scheduleResimulate();
+}
+
+export function sourceDirectivityNarrowness(source: RoomSource): number {
+  return (source.directivity.weight - MINIMUM_DIRECTIVITY_WEIGHT) / (MAXIMUM_DIRECTIVITY_WEIGHT - MINIMUM_DIRECTIVITY_WEIGHT);
 }
 
 export function updateSelectedBoxesAbsorptionBand(band: 'low' | 'mid' | 'high', value: number): void {
@@ -370,12 +398,38 @@ export function updateSelectedBoxField(boxId: string, field: 'x' | 'y' | 'z' | '
 }
 
 export function moveSourceOnAxes(axes: OrthographicAxes, point: Point2D): void {
-  sourcePosition.value = { ...sourcePosition.value, [axes.horizontal]: point.horizontal, [axes.vertical]: point.vertical };
+  roomSource.value = { ...roomSource.value, [axes.horizontal]: point.horizontal, [axes.vertical]: point.vertical };
   scheduleResimulate();
 }
 
 export function moveListenerOnAxes(axes: OrthographicAxes, point: Point2D): void {
-  listenerPosition.value = { ...listenerPosition.value, [axes.horizontal]: point.horizontal, [axes.vertical]: point.vertical };
+  roomListener.value = { ...roomListener.value, [axes.horizontal]: point.horizontal, [axes.vertical]: point.vertical };
+  scheduleResimulate();
+}
+
+/** Folded into 0-360 so the editor's readout never shows a negative or wrapped-around angle, however many
+    times a rotation handle has been dragged around. */
+function normalizeYawDegrees(yawDegrees: number): number {
+  return ((yawDegrees % 360) + 360) % 360;
+}
+
+export function setSourceYaw(yawDegrees: number): void {
+  roomSource.value = { ...roomSource.value, yawDegrees: normalizeYawDegrees(yawDegrees) };
+  scheduleResimulate();
+}
+
+export function setListenerYaw(yawDegrees: number): void {
+  roomListener.value = { ...roomListener.value, yawDegrees: normalizeYawDegrees(yawDegrees) };
+  scheduleResimulate();
+}
+
+export function setSourceCoordinate(axis: 'x' | 'y' | 'z', meters: number): void {
+  roomSource.value = { ...roomSource.value, [axis]: meters };
+  scheduleResimulate();
+}
+
+export function setListenerCoordinate(axis: 'x' | 'y' | 'z', meters: number): void {
+  roomListener.value = { ...roomListener.value, [axis]: meters };
   scheduleResimulate();
 }
 
@@ -426,8 +480,8 @@ export async function importRoomFromFile(file: File): Promise<void> {
   try {
     const scene = parseRoomScene(await file.text());
     roomBoxes.value = scene.boxes;
-    sourcePosition.value = scene.source;
-    listenerPosition.value = scene.listener;
+    roomSource.value = scene.source;
+    roomListener.value = scene.listener;
     selectedBoxIds.value = new Set();
     reverbErrorMessage.value = null;
     scheduleResimulate();

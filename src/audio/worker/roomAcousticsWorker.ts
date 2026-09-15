@@ -20,7 +20,6 @@ self.onmessage = (event: MessageEvent<RoomAcousticsWorkerRequest>) => {
           request.scene,
           request.sampleRate,
           rayTracingParamsForQuality(request.quality),
-          request.stereoSimulationEnabled,
         );
 
         respond(

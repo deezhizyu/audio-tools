@@ -5,11 +5,13 @@ export interface EnergyHistogram {
   low: Float32Array;
   mid: Float32Array;
   high: Float32Array;
-  /** Each bin's energy-weighted average `panPosition` across the arrivals that landed in it (-1 fully left,
-      +1 fully right, 0 centered, and 0 for a bin with no energy at all) — lets
-      `synthesizeImpulseResponseFromHistogram.ts` give the diffuse tail a left/right image when stereo
-      simulation is enabled, without this module needing to know about stereo synthesis itself. */
-  pan: Float32Array;
+  /** Each bin's energy-weighted average `lateralPosition` across the arrivals that landed in it (-1 fully
+      left, +1 fully right, 0 centered, and 0 for a bin with no energy at all) — lets
+      `synthesizeImpulseResponseFromHistogram.ts` shadow the tail toward one ear, without this module needing
+      to know anything about how the listener hears. Averaging is all a bin can carry: it summarizes thousands
+      of paths arriving from every direction, and a single side-to-side bias is the only part of that which
+      survives being summed together. */
+  lateralPosition: Float32Array;
 }
 
 /** Bins ray arrivals into fixed-width time buckets per frequency band. Arrivals already carry absolute energy
@@ -24,8 +26,8 @@ export function buildEnergyHistogram(arrivals: ImpulseArrival[], binDurationSeco
   const low = new Float32Array(binCount);
   const mid = new Float32Array(binCount);
   const high = new Float32Array(binCount);
-  const panWeightedPositionSum = new Float32Array(binCount);
-  const panWeightSum = new Float32Array(binCount);
+  const weightedLateralSum = new Float32Array(binCount);
+  const lateralWeightSum = new Float32Array(binCount);
 
   for (const arrival of arrivals) {
     if (arrival.timeSeconds < 0 || arrival.timeSeconds >= totalDurationSeconds) continue;
@@ -35,16 +37,16 @@ export function buildEnergyHistogram(arrivals: ImpulseArrival[], binDurationSeco
     high[binIndex] += arrival.energy.high;
 
     const arrivalTotalEnergy = arrival.energy.low + arrival.energy.mid + arrival.energy.high;
-    panWeightedPositionSum[binIndex] += arrival.panPosition * arrivalTotalEnergy;
-    panWeightSum[binIndex] += arrivalTotalEnergy;
+    weightedLateralSum[binIndex] += arrival.lateralPosition * arrivalTotalEnergy;
+    lateralWeightSum[binIndex] += arrivalTotalEnergy;
   }
 
-  const pan = new Float32Array(binCount);
+  const lateralPosition = new Float32Array(binCount);
   for (let binIndex = 0; binIndex < binCount; binIndex++) {
-    pan[binIndex] = panWeightSum[binIndex] > 0 ? panWeightedPositionSum[binIndex] / panWeightSum[binIndex] : 0;
+    lateralPosition[binIndex] = lateralWeightSum[binIndex] > 0 ? weightedLateralSum[binIndex] / lateralWeightSum[binIndex] : 0;
   }
 
-  return { binDurationSeconds, low, mid, high, pan };
+  return { binDurationSeconds, low, mid, high, lateralPosition };
 }
 
 /** A copy of `histogram` covering only its first `durationSeconds` — used to trim the generously-sized
@@ -59,6 +61,6 @@ export function truncateEnergyHistogram(histogram: EnergyHistogram, durationSeco
     low: histogram.low.slice(0, binCount),
     mid: histogram.mid.slice(0, binCount),
     high: histogram.high.slice(0, binCount),
-    pan: histogram.pan.slice(0, binCount),
+    lateralPosition: histogram.lateralPosition.slice(0, binCount),
   };
 }
