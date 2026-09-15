@@ -1,12 +1,18 @@
-import { applyAirAbsorption } from './airAbsorption';
-import { isSegmentUnobstructed } from './lineOfSight';
-import { intersectRayWithBox, type AxisAlignedBox, type Ray } from './rayBoxIntersection';
+import { AIR_ABSORPTION_COEFFICIENTS_PER_METER, airAbsorptionGain } from './airAbsorption';
+import { lateralPositionInFrame, listenerHorizontalFrame, type ListenerHorizontalFrame } from './listenerHeadModel';
+import {
+  BOUNDS_STRIDE,
+  createRayBoxHit,
+  intersectRayWithPackedBounds,
+  isBlockedByPackedBounds,
+  type RayBoxHit,
+} from './rayBoxIntersection';
 import { getEffectiveScatterAmount } from './roomMaterials';
-import { toAxisAlignedBox } from './roomBoxGeometry';
-import { lateralPositionInListenerFrame } from './listenerHeadModel';
+import { packBoxBounds } from './roomBoxGeometry';
 import {
   energyPerRay,
   INTERACTIVE_MAXIMUM_BOUNCES,
+  INTERACTIVE_MAXIMUM_RAY_DISTANCE_METERS,
   INTERACTIVE_NUMBER_OF_RAYS,
   MAXIMUM_BOUNCES,
   MAXIMUM_IMAGE_SOURCE_ORDER,
@@ -17,18 +23,9 @@ import {
   RUSSIAN_ROULETTE_THRESHOLD,
   SPEED_OF_SOUND_METERS_PER_SECOND,
 } from './roomAcousticsDefaults';
-import type { FrequencyBandValues, RoomBox, RoomListener, RoomScene } from './roomTypes';
+import type { FrequencyBandValues, RoomScene } from './roomTypes';
 import { directivityGain } from './sourceDirectivity';
-import {
-  addVectors,
-  distanceBetweenPoints,
-  dotVectors,
-  randomCosineWeightedHemisphereVector,
-  randomUnitVector,
-  reflectVector,
-  scaleVector,
-  type Vector3,
-} from './vector3';
+import { randomCosineWeightedHemisphereVector, randomUnitVector } from './vector3';
 
 export interface RayTracingParams {
   numberOfRays: number;
@@ -36,6 +33,9 @@ export interface RayTracingParams {
   speedOfSoundMetersPerSecond: number;
   minimumContributionDistanceMeters: number;
   minimumEnergyThreshold: number;
+  /** How far a ray may travel before it is abandoned. Doubles as the cap on how long an impulse response
+      this pass will render (see `chooseImpulseResponseDurationSeconds`), since a path longer than this was
+      never traced and so has nothing to contribute past it. */
   maximumDistanceMeters: number;
   /** Injectable so ray directions/scatter are deterministic in tests; defaults to `Math.random`. */
   randomSource: () => number;
@@ -58,6 +58,7 @@ export const INTERACTIVE_RAY_TRACING_PARAMS: RayTracingParams = {
   ...DEFAULT_RAY_TRACING_PARAMS,
   numberOfRays: INTERACTIVE_NUMBER_OF_RAYS,
   maximumBounces: INTERACTIVE_MAXIMUM_BOUNCES,
+  maximumDistanceMeters: INTERACTIVE_MAXIMUM_RAY_DISTANCE_METERS,
 };
 
 export interface ImpulseArrival {
@@ -67,8 +68,8 @@ export interface ImpulseArrival {
       consumer needs to normalize by ray count. */
   energy: FrequencyBandValues;
   /** Where this arrival sits on the listener's own left/right axis (-1 fully left, +1 fully right, 0 straight
-      ahead or behind) — see `lateralPositionInListenerFrame` in `listenerHeadModel.ts`. Measured in the
-      listener's frame rather than the room's, so turning the listener really does turn the room around them. */
+      ahead or behind) — see `lateralPositionInFrame` in `listenerHeadModel.ts`. Measured in the listener's
+      frame rather than the room's, so turning the listener really does turn the room around them. */
   lateralPosition: number;
 }
 
@@ -79,44 +80,6 @@ const SURFACE_OFFSET_METERS = 1e-4;
 /** Below this, a straight line from a hit point to the listener is considered coincident with the hit point
     itself (no meaningful direction to test for occlusion). */
 const COINCIDENT_POINT_EPSILON_METERS = 1e-9;
-
-/** A box paired with its axis-aligned bounds, computed once per `traceRays` call rather than on every one of
-    the millions of ray-box tests a simulation runs — the boxes never move during a single simulation, so
-    reconstructing this six-number object from scratch on every test was pure, avoidable allocation churn. */
-interface BoxWithBounds {
-  box: RoomBox;
-  bounds: AxisAlignedBox;
-}
-
-function toBoxesWithBounds(boxes: RoomBox[]): BoxWithBounds[] {
-  return boxes.map(box => ({ box, bounds: toAxisAlignedBox(box) }));
-}
-
-/** `hitFromInside: true` lets a box double as a room's enclosing shell: a ray whose origin sits inside a box
-    (e.g. because the source/listener were placed inside one big bounding box instead of surrounded by separate
-    wall slabs) bounces off that box's inner surface rather than passing straight through it — see
-    `rayBoxIntersection.ts`. This has no effect on the ordinary case (a ray outside a box approaching it), so it
-    doesn't change behavior for the usual "separate wall boxes with open space between them" room layout. */
-function findNearestHit(ray: Ray, boxes: BoxWithBounds[]): { box: RoomBox; distance: number; normal: Vector3 } | null {
-  let nearest: { box: RoomBox; distance: number; normal: Vector3 } | null = null;
-
-  for (const { box, bounds } of boxes) {
-    const intersection = intersectRayWithBox(ray, bounds, { hitFromInside: true });
-    if (intersection && (!nearest || intersection.distance < nearest.distance)) {
-      nearest = { box, distance: intersection.distance, normal: intersection.normal };
-    }
-  }
-
-  return nearest;
-}
-
-function scaleBandValues(values: FrequencyBandValues, scale: number): FrequencyBandValues {
-  return { low: values.low * scale, mid: values.mid * scale, high: values.high * scale };
-}
-
-function maximumBandValue(values: FrequencyBandValues): number {
-  return Math.max(values.low, values.mid, values.high);
-}
 
 /** Maps a surface's roughness onto how tightly its specular highlight is focused. The standard roughness-to
     -exponent mapping: a near-mirror surface gets a needle-thin lobe, a rough one a broad, soft highlight.
@@ -131,82 +94,181 @@ function specularLobeExponent(scatterAmount: number): number {
   return Math.min(MAXIMUM_SPECULAR_LOBE_EXPONENT, Math.max(0, 2 / (roughness * roughness) - 2));
 }
 
-/** Next-event estimation: rather than waiting for a stochastic ray to wander within some capture radius of
-    the listener (which starves nearby listeners of samples and, worse, lets a ray's very first, pre-bounce
-    segment "capture" spurious energy when the listener happens to sit close to the source), every bounce
-    fires one deterministic shadow ray straight at the listener. If it's unobstructed, the bounce contributes
-    energy through the surface's reflection distribution: a Lambertian diffuse lobe (`scatterAmount/π`,
-    weighted by the cosine of how directly the surface faces the listener) plus a specular lobe peaked on the
-    true mirror-reflection direction and weighted by `1 - scatterAmount`. Each lobe integrates to one over the
-    outgoing hemisphere and the two weights sum to one, so raising a surface's roughness *redistributes* its
-    reflected energy from a narrow highlight into a wide spread rather than inflating or losing the total.
-    Firing deterministic shadow rays instead of hoping a ray wanders close enough is what real-time
-    geometric-acoustics engines (e.g. Steam Audio) use to avoid the "rays miss the listener" failure mode.
+/**
+ * Everything a trace needs that doesn't change from ray to ray, resolved once.
+ *
+ * Several of these are here specifically because they are expensive to recompute: the listener's frame costs
+ * two trigonometric calls, the packed bounds are the whole geometry flattened, and each box's effective
+ * scattering is a map lookup and a multiply. All three sit inside a loop that runs millions of times, and
+ * none of them can change while it does.
+ */
+interface TraceContext {
+  params: RayTracingParams;
+  boxBounds: Float64Array;
+  /** Per box, parallel to `boxBounds`: its scattering, and whether a ray that reaches it simply stops. */
+  scatterAmounts: Float64Array;
+  absorbsCompletely: Uint8Array;
+  absorptionLow: Float64Array;
+  absorptionMid: Float64Array;
+  absorptionHigh: Float64Array;
+  listenerX: number;
+  listenerY: number;
+  listenerZ: number;
+  listenerFrame: ListenerHorizontalFrame;
+  energyPerRayValue: number;
+  /** Reused across the whole trace so no intersection test ever allocates. */
+  shadowHit: RayBoxHit;
+  arrivals: ImpulseArrival[];
+}
 
-    The specular lobe is built around the mirror-reflection direction rather than the half-vector between the
-    incoming ray and the shadow ray. The half-vector form — a graphics convention, and what this used to use —
-    is not energy conserving here: its integral over the outgoing hemisphere comes out as the cosine of the
-    angle of incidence, so it silently discards energy as reflections get more oblique, losing half of it at
-    60° and five sixths at 80°. Since most wall reflections in a room *are* oblique, that quietly drained the
-    reverberant field of a large part of its energy, leaving rooms far drier than their geometry implies.
+function buildTraceContext(scene: RoomScene, params: RayTracingParams): TraceContext {
+  const boxCount = scene.boxes.length;
+  const context: TraceContext = {
+    params,
+    boxBounds: packBoxBounds(scene.boxes),
+    scatterAmounts: new Float64Array(boxCount),
+    absorbsCompletely: new Uint8Array(boxCount),
+    absorptionLow: new Float64Array(boxCount),
+    absorptionMid: new Float64Array(boxCount),
+    absorptionHigh: new Float64Array(boxCount),
+    listenerX: scene.listener.x,
+    listenerY: scene.listener.y,
+    listenerZ: scene.listener.z,
+    listenerFrame: listenerHorizontalFrame(scene.listener),
+    energyPerRayValue: energyPerRay(params.numberOfRays),
+    shadowHit: createRayBoxHit(),
+    arrivals: [],
+  };
 
-    `throughputAtHit` is the fraction of this ray's *original* energy still carried after every absorption so
-    far; `energyPerRayValue` converts that fraction into absolute energy (see `energyPerRay`). Keeping the two
-    separate is what lets Russian roulette below reason about throughput in ray-count-independent terms.
+  scene.boxes.forEach((box, boxIndex) => {
+    context.scatterAmounts[boxIndex] = getEffectiveScatterAmount(box);
+    context.absorbsCompletely[boxIndex] = box.kind === 'absorber' ? 1 : 0;
+    context.absorptionLow[boxIndex] = box.absorption.low;
+    context.absorptionMid[boxIndex] = box.absorption.mid;
+    context.absorptionHigh[boxIndex] = box.absorption.high;
+  });
 
-    `includeSpecularLobe` is false for the low-order all-specular paths that `imageSources.ts` computes
-    exactly, so the same echo is never delivered twice. */
+  return context;
+}
+
+/**
+ * Next-event estimation: rather than waiting for a stochastic ray to wander within some capture radius of
+ * the listener (which starves nearby listeners of samples and, worse, lets a ray's very first, pre-bounce
+ * segment "capture" spurious energy when the listener happens to sit close to the source), every bounce
+ * fires one deterministic shadow ray straight at the listener. If it's unobstructed, the bounce contributes
+ * energy through the surface's reflection distribution: a Lambertian diffuse lobe (`scatterAmount/π`,
+ * weighted by the cosine of how directly the surface faces the listener) plus a specular lobe peaked on the
+ * true mirror-reflection direction and weighted by `1 - scatterAmount`. Each lobe integrates to one over the
+ * outgoing hemisphere and the two weights sum to one, so raising a surface's roughness *redistributes* its
+ * reflected energy from a narrow highlight into a wide spread rather than inflating or losing the total.
+ * Firing deterministic shadow rays instead of hoping a ray wanders close enough is what real-time
+ * geometric-acoustics engines (e.g. Steam Audio) use to avoid the "rays miss the listener" failure mode.
+ *
+ * The specular lobe is built around the mirror-reflection direction rather than the half-vector between the
+ * incoming ray and the shadow ray. The half-vector form — a graphics convention, and what this used to use —
+ * is not energy conserving here: its integral over the outgoing hemisphere comes out as the cosine of the
+ * angle of incidence, so it silently discards energy as reflections get more oblique, losing half of it at
+ * 60° and five sixths at 80°. Since most wall reflections in a room *are* oblique, that quietly drained the
+ * reverberant field of a large part of its energy, leaving rooms far drier than their geometry implies.
+ *
+ * `throughput*` is the fraction of this ray's original energy still carried after every absorption so far;
+ * `context.energyPerRayValue` converts that fraction into absolute energy. Keeping the two separate is what
+ * lets Russian roulette below reason about throughput in ray-count-independent terms.
+ *
+ * `includeSpecularLobe` is false for the low-order all-specular paths that `imageSources.ts` computes
+ * exactly, so the same echo is never delivered twice.
+ *
+ * Takes its geometry as loose numbers rather than vectors and points because it runs once per bounce of
+ * every ray: at that rate the objects a tidier signature would allocate cost more than the arithmetic does.
+ */
 function recordReflectionArrival(
-  hitPoint: Vector3,
-  hitNormal: Vector3,
-  incomingDirection: Vector3,
+  context: TraceContext,
+  hitX: number,
+  hitY: number,
+  hitZ: number,
+  normalAxis: 0 | 1 | 2,
+  normalSign: number,
+  incomingX: number,
+  incomingY: number,
+  incomingZ: number,
   hitScatterAmount: number,
   includeSpecularLobe: boolean,
   distanceTraveledToHit: number,
-  throughputAtHit: FrequencyBandValues,
-  energyPerRayValue: number,
-  listener: RoomListener,
-  boxBounds: AxisAlignedBox[],
-  params: RayTracingParams,
-  arrivals: ImpulseArrival[],
+  throughputLow: number,
+  throughputMid: number,
+  throughputHigh: number,
 ): void {
-  const originPoint = addVectors(hitPoint, scaleVector(hitNormal, SURFACE_OFFSET_METERS));
-  const distanceToListener = distanceBetweenPoints(originPoint, listener);
+  const normalX = normalAxis === 0 ? normalSign : 0;
+  const normalY = normalAxis === 1 ? normalSign : 0;
+  const normalZ = normalAxis === 2 ? normalSign : 0;
 
-  const directionToListener =
-    distanceToListener < COINCIDENT_POINT_EPSILON_METERS
-      ? hitNormal
-      : scaleVector({ x: listener.x - originPoint.x, y: listener.y - originPoint.y, z: listener.z - originPoint.z }, 1 / distanceToListener);
-  const cosineWeight = dotVectors(hitNormal, directionToListener);
+  const originX = hitX + normalX * SURFACE_OFFSET_METERS;
+  const originY = hitY + normalY * SURFACE_OFFSET_METERS;
+  const originZ = hitZ + normalZ * SURFACE_OFFSET_METERS;
+
+  const toListenerX = context.listenerX - originX;
+  const toListenerY = context.listenerY - originY;
+  const toListenerZ = context.listenerZ - originZ;
+  const distanceToListener = Math.sqrt(toListenerX * toListenerX + toListenerY * toListenerY + toListenerZ * toListenerZ);
+  if (distanceToListener < COINCIDENT_POINT_EPSILON_METERS) return;
+
+  const inverseDistance = 1 / distanceToListener;
+  const directionX = toListenerX * inverseDistance;
+  const directionY = toListenerY * inverseDistance;
+  const directionZ = toListenerZ * inverseDistance;
+
+  // Only the normal's own axis contributes, since it is an axis-aligned unit vector.
+  const cosineWeight = (normalAxis === 0 ? directionX : normalAxis === 1 ? directionY : directionZ) * normalSign;
   if (cosineWeight <= 0) return;
 
   const diffuseLobeWeight = (hitScatterAmount / Math.PI) * cosineWeight;
 
   let specularLobeWeight = 0;
   if (includeSpecularLobe && hitScatterAmount < 1) {
-    const mirrorDirection = reflectVector(incomingDirection, hitNormal);
-    const specularAlignment = Math.max(0, dotVectors(mirrorDirection, directionToListener));
+    const incomingAlongNormal = (normalAxis === 0 ? incomingX : normalAxis === 1 ? incomingY : incomingZ) * normalSign;
+    const mirrorX = incomingX - 2 * incomingAlongNormal * normalX;
+    const mirrorY = incomingY - 2 * incomingAlongNormal * normalY;
+    const mirrorZ = incomingZ - 2 * incomingAlongNormal * normalZ;
+
+    const specularAlignment = Math.max(0, mirrorX * directionX + mirrorY * directionY + mirrorZ * directionZ);
     const exponent = specularLobeExponent(hitScatterAmount);
     specularLobeWeight = ((exponent + 1) / (2 * Math.PI)) * (1 - hitScatterAmount) * Math.pow(specularAlignment, exponent);
   }
 
-  const clampedDistance = Math.max(distanceToListener, params.minimumContributionDistanceMeters);
-  const attenuation = (energyPerRayValue * (diffuseLobeWeight + specularLobeWeight)) / (clampedDistance * clampedDistance);
+  const clampedDistance = Math.max(distanceToListener, context.params.minimumContributionDistanceMeters);
+  const attenuation = (context.energyPerRayValue * (diffuseLobeWeight + specularLobeWeight)) / (clampedDistance * clampedDistance);
 
   // Cheap tests first: the shadow ray costs a pass over every box in the scene, so it is only worth firing
   // once this contribution is known to be big enough to matter at all.
-  if (maximumBandValue(throughputAtHit) * attenuation < params.minimumEnergyThreshold) return;
-  if (!isSegmentUnobstructed(originPoint, directionToListener, distanceToListener, boxBounds)) return;
+  const strongestThroughput = Math.max(throughputLow, throughputMid, throughputHigh);
+  if (strongestThroughput * attenuation < context.params.minimumEnergyThreshold) return;
+  if (
+    isBlockedByPackedBounds(
+      originX,
+      originY,
+      originZ,
+      directionX,
+      directionY,
+      directionZ,
+      distanceToListener - COINCIDENT_POINT_EPSILON_METERS,
+      context.boxBounds,
+      context.shadowHit,
+    )
+  ) {
+    return;
+  }
 
   const totalDistance = distanceTraveledToHit + distanceToListener;
 
-  // The arrival reaches the listener from `originPoint`, i.e. along the reverse of `directionToListener`.
-  const lateralPosition = lateralPositionInListenerFrame(scaleVector(directionToListener, -1), listener);
-
-  arrivals.push({
-    timeSeconds: totalDistance / params.speedOfSoundMetersPerSecond,
-    energy: applyAirAbsorption(scaleBandValues(throughputAtHit, attenuation), totalDistance),
-    lateralPosition,
+  context.arrivals.push({
+    timeSeconds: totalDistance / context.params.speedOfSoundMetersPerSecond,
+    energy: {
+      low: throughputLow * attenuation * airAbsorptionGain(AIR_ABSORPTION_COEFFICIENTS_PER_METER.low, totalDistance),
+      mid: throughputMid * attenuation * airAbsorptionGain(AIR_ABSORPTION_COEFFICIENTS_PER_METER.mid, totalDistance),
+      high: throughputHigh * attenuation * airAbsorptionGain(AIR_ABSORPTION_COEFFICIENTS_PER_METER.high, totalDistance),
+    },
+    // The arrival reaches the listener from `origin`, i.e. along the reverse of the direction just computed.
+    lateralPosition: lateralPositionInFrame(context.listenerFrame, -directionX, -directionZ),
   });
 }
 
@@ -223,25 +285,33 @@ function recordReflectionArrival(
 
     Two paths are deliberately not sampled here, because both are computed exactly elsewhere and would only
     be approximated worse by random sampling: the direct, unreflected path (`directSound.ts`), and the
-    low-order all-specular echoes (`imageSources.ts`) that `includeSpecularLobe` below excludes. */
+    low-order all-specular echoes (`imageSources.ts`) that `includeSpecularLobe` excludes. */
 export function traceRays(scene: RoomScene, params: RayTracingParams): ImpulseArrival[] {
-  const arrivals: ImpulseArrival[] = [];
-  const boxes = toBoxesWithBounds(scene.boxes);
-  const boxBounds = boxes.map(({ bounds }) => bounds);
-  const energyPerRayValue = energyPerRay(params.numberOfRays);
+  const context = buildTraceContext(scene, params);
+  const boxCount = scene.boxes.length;
+  const nearestHit = createRayBoxHit();
 
   for (let rayIndex = 0; rayIndex < params.numberOfRays; rayIndex++) {
-    let position: Vector3 = { x: scene.source.x, y: scene.source.y, z: scene.source.z };
-    let direction = randomUnitVector(params.randomSource);
+    let positionX = scene.source.x;
+    let positionY = scene.source.y;
+    let positionZ = scene.source.z;
+
+    const initialDirection = randomUnitVector(params.randomSource);
+    let directionX = initialDirection.x;
+    let directionY = initialDirection.y;
+    let directionZ = initialDirection.z;
 
     // The fraction of this ray's starting energy still in flight, per band. It starts at the source's
     // directivity in the direction this ray happens to leave along rather than at 1, so a narrowly-aimed
-    // source's off-axis rays start out faint and are dropped below without ever being traced.
-    const emittedFraction = directivityGain(scene.source, direction);
+    // source's off-axis rays start out faint and are dropped here without ever being traced.
+    const emittedFraction = directivityGain(scene.source, initialDirection);
     if (emittedFraction < params.minimumEnergyThreshold) continue;
     // Tracked as a fraction rather than as absolute energy so Russian roulette's threshold below means the
     // same thing regardless of how many rays the simulation happens to be firing.
-    let throughput: FrequencyBandValues = { low: emittedFraction, mid: emittedFraction, high: emittedFraction };
+    let throughputLow = emittedFraction;
+    let throughputMid = emittedFraction;
+    let throughputHigh = emittedFraction;
+
     let distanceTraveled = 0;
     // Only a ray that has mirror-reflected at every bounce so far is travelling a path the image-source pass
     // also computes; once it scatters, it is carrying diffuse energy that pass knows nothing about, and its
@@ -249,39 +319,65 @@ export function traceRays(scene: RoomScene, params: RayTracingParams): ImpulseAr
     let hasOnlySpecularBounces = true;
 
     for (let bounce = 0; bounce < params.maximumBounces; bounce++) {
-      const hit = findNearestHit({ origin: position, direction }, boxes);
-      const remainingBudget = params.maximumDistanceMeters - distanceTraveled;
-      if (!hit || hit.distance > remainingBudget) break;
+      let nearestDistance = params.maximumDistanceMeters - distanceTraveled;
+      let nearestBoxIndex = -1;
+      let nearestNormalAxis: 0 | 1 | 2 = 0;
+      let nearestNormalSign = 1;
 
-      distanceTraveled += hit.distance;
-      const hitPoint = addVectors(position, scaleVector(direction, hit.distance));
+      for (let boxIndex = 0; boxIndex < boxCount; boxIndex++) {
+        const wasHit = intersectRayWithPackedBounds(
+          positionX,
+          positionY,
+          positionZ,
+          directionX,
+          directionY,
+          directionZ,
+          context.boxBounds,
+          boxIndex * BOUNDS_STRIDE,
+          true,
+          nearestHit,
+        );
+        if (wasHit && nearestHit.distance < nearestDistance) {
+          nearestDistance = nearestHit.distance;
+          nearestBoxIndex = boxIndex;
+          nearestNormalAxis = nearestHit.normalAxis;
+          nearestNormalSign = nearestHit.normalSign;
+        }
+      }
 
-      if (hit.box.kind === 'absorber') break;
+      if (nearestBoxIndex < 0) break;
 
-      const throughputAfterAbsorption = {
-        low: throughput.low * (1 - hit.box.absorption.low),
-        mid: throughput.mid * (1 - hit.box.absorption.mid),
-        high: throughput.high * (1 - hit.box.absorption.high),
-      };
+      distanceTraveled += nearestDistance;
+      const hitX = positionX + directionX * nearestDistance;
+      const hitY = positionY + directionY * nearestDistance;
+      const hitZ = positionZ + directionZ * nearestDistance;
 
-      const hitScatterAmount = getEffectiveScatterAmount(hit.box);
-      const includeSpecularLobe = !hasOnlySpecularBounces || bounce >= MAXIMUM_IMAGE_SOURCE_ORDER;
+      if (context.absorbsCompletely[nearestBoxIndex] === 1) break;
+
+      const throughputAfterLow = throughputLow * (1 - context.absorptionLow[nearestBoxIndex]);
+      const throughputAfterMid = throughputMid * (1 - context.absorptionMid[nearestBoxIndex]);
+      const throughputAfterHigh = throughputHigh * (1 - context.absorptionHigh[nearestBoxIndex]);
+
+      const hitScatterAmount = context.scatterAmounts[nearestBoxIndex];
       recordReflectionArrival(
-        hitPoint,
-        hit.normal,
-        direction,
+        context,
+        hitX,
+        hitY,
+        hitZ,
+        nearestNormalAxis,
+        nearestNormalSign,
+        directionX,
+        directionY,
+        directionZ,
         hitScatterAmount,
-        includeSpecularLobe,
+        !hasOnlySpecularBounces || bounce >= MAXIMUM_IMAGE_SOURCE_ORDER,
         distanceTraveled,
-        throughputAfterAbsorption,
-        energyPerRayValue,
-        scene.listener,
-        boxBounds,
-        params,
-        arrivals,
+        throughputAfterLow,
+        throughputAfterMid,
+        throughputAfterHigh,
       );
 
-      const remainingThroughput = maximumBandValue(throughputAfterAbsorption);
+      const remainingThroughput = Math.max(throughputAfterLow, throughputAfterMid, throughputAfterHigh);
       if (remainingThroughput < params.minimumEnergyThreshold) break;
 
       // Russian roulette: below the threshold, keep the ray only with probability proportional to what it
@@ -289,24 +385,41 @@ export function traceRays(scene: RoomScene, params: RayTracingParams): ImpulseAr
       // is simply carried by fewer, heavier rays the deeper it goes — so a long decay costs about what it
       // physically should instead of every ray being traced to a fixed bounce count regardless of whether it
       // still contributes anything.
-      throughput = throughputAfterAbsorption;
+      let survivalBoost = 1;
       if (remainingThroughput < RUSSIAN_ROULETTE_THRESHOLD) {
         const survivalProbability = remainingThroughput / RUSSIAN_ROULETTE_THRESHOLD;
         if (params.randomSource() >= survivalProbability) break;
-        throughput = scaleBandValues(throughput, 1 / survivalProbability);
+        survivalBoost = 1 / survivalProbability;
       }
+      throughputLow = throughputAfterLow * survivalBoost;
+      throughputMid = throughputAfterMid * survivalBoost;
+      throughputHigh = throughputAfterHigh * survivalBoost;
 
       // A stochastic pick between a pure diffuse direction and the pure specular reflection — never a blend
       // of both — matching Steam Audio's own `bounce()`. Averaging the two directions into one vector (an
       // earlier version of this function) isn't a sample of any real reflection distribution; this is.
-      const scattersDiffusely = params.randomSource() < hitScatterAmount;
-      direction = scattersDiffusely
-        ? randomCosineWeightedHemisphereVector(hit.normal, params.randomSource)
-        : reflectVector(direction, hit.normal);
-      if (scattersDiffusely) hasOnlySpecularBounces = false;
-      position = addVectors(hitPoint, scaleVector(hit.normal, SURFACE_OFFSET_METERS));
+      const normalX = nearestNormalAxis === 0 ? nearestNormalSign : 0;
+      const normalY = nearestNormalAxis === 1 ? nearestNormalSign : 0;
+      const normalZ = nearestNormalAxis === 2 ? nearestNormalSign : 0;
+
+      if (params.randomSource() < hitScatterAmount) {
+        const scattered = randomCosineWeightedHemisphereVector({ x: normalX, y: normalY, z: normalZ }, params.randomSource);
+        directionX = scattered.x;
+        directionY = scattered.y;
+        directionZ = scattered.z;
+        hasOnlySpecularBounces = false;
+      } else {
+        const incomingAlongNormal = (nearestNormalAxis === 0 ? directionX : nearestNormalAxis === 1 ? directionY : directionZ) * nearestNormalSign;
+        directionX -= 2 * incomingAlongNormal * normalX;
+        directionY -= 2 * incomingAlongNormal * normalY;
+        directionZ -= 2 * incomingAlongNormal * normalZ;
+      }
+
+      positionX = hitX + normalX * SURFACE_OFFSET_METERS;
+      positionY = hitY + normalY * SURFACE_OFFSET_METERS;
+      positionZ = hitZ + normalZ * SURFACE_OFFSET_METERS;
     }
   }
 
-  return arrivals;
+  return context.arrivals;
 }

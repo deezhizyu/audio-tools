@@ -1,4 +1,4 @@
-import { intersectRayWithBox, type AxisAlignedBox } from './rayBoxIntersection';
+import { createRayBoxHit, isBlockedByPackedBounds, type RayBoxHit } from './rayBoxIntersection';
 import type { Vector3 } from './vector3';
 
 /** Slack on the segment's own length, so a segment that ends exactly on a box's surface (a reflection point,
@@ -15,11 +15,26 @@ const OCCLUSION_EPSILON_METERS = 1e-6;
  * Deliberately tests boxes from the outside only (no `hitFromInside`): a segment whose endpoints both sit
  * *inside* a box — the ordinary case when one big box is being used as a room's enclosing shell — is not
  * obstructed by that shell, and treating it as such would silence every path in such a room.
+ *
+ * `scratchHit` is somewhere for the intersection test to put its answer. Callers on the hot path pass one
+ * they reuse for the whole simulation rather than letting each test allocate.
  */
-export function isSegmentUnobstructed(from: Vector3, direction: Vector3, distanceMeters: number, boxBounds: AxisAlignedBox[]): boolean {
-  for (const bounds of boxBounds) {
-    const hit = intersectRayWithBox({ origin: from, direction }, bounds);
-    if (hit !== null && hit.distance < distanceMeters - OCCLUSION_EPSILON_METERS) return false;
-  }
-  return true;
+export function isSegmentUnobstructed(
+  from: Vector3,
+  direction: Vector3,
+  distanceMeters: number,
+  boxBounds: Float64Array,
+  scratchHit: RayBoxHit = createRayBoxHit(),
+): boolean {
+  return !isBlockedByPackedBounds(
+    from.x,
+    from.y,
+    from.z,
+    direction.x,
+    direction.y,
+    direction.z,
+    distanceMeters - OCCLUSION_EPSILON_METERS,
+    boxBounds,
+    scratchHit,
+  );
 }

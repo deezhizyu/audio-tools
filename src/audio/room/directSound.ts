@@ -2,7 +2,7 @@ import { applyAirAbsorption } from './airAbsorption';
 import type { DiscreteArrival } from './discreteArrival';
 import { isSegmentUnobstructed } from './lineOfSight';
 import { MINIMUM_CONTRIBUTION_DISTANCE_METERS } from './roomAcousticsDefaults';
-import { toAxisAlignedBox } from './roomBoxGeometry';
+import { packBoxBounds } from './roomBoxGeometry';
 import type { FrequencyBandValues, RoomScene } from './roomTypes';
 import { directivityGain } from './sourceDirectivity';
 import { buildOrthonormalBasis, distanceBetweenPoints, normalizeVector, scaleVector, type Vector3 } from './vector3';
@@ -39,7 +39,7 @@ function spreadingEnergy(distanceMeters: number): number {
     instead of only ever blocking it entirely. The bundle's radius shrinks for very short paths so two points
     a few centimeters apart aren't judged by obstructions half a meter off to the side. */
 function computeVisibleFraction(scene: RoomScene, direction: Vector3, distanceMeters: number): number {
-  const boxBounds = scene.boxes.map(toAxisAlignedBox);
+  const boxBounds = packBoxBounds(scene.boxes);
   const radiusMeters = Math.min(OCCLUSION_SAMPLE_RADIUS_METERS, distanceMeters / 4);
   const { tangent, bitangent } = buildOrthonormalBasis(direction);
 

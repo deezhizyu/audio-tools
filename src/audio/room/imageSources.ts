@@ -3,7 +3,7 @@ import type { DiscreteArrival } from './discreteArrival';
 import { isSegmentUnobstructed } from './lineOfSight';
 import type { AxisAlignedBox } from './rayBoxIntersection';
 import { MINIMUM_CONTRIBUTION_DISTANCE_METERS } from './roomAcousticsDefaults';
-import { toAxisAlignedBox } from './roomBoxGeometry';
+import { packBoxBounds, toAxisAlignedBox } from './roomBoxGeometry';
 import { getEffectiveScatterAmount } from './roomMaterials';
 import type { FrequencyBandValues, RoomBox, RoomScene } from './roomTypes';
 import { directivityGain } from './sourceDirectivity';
@@ -83,7 +83,7 @@ function isPointWithinFace(point: Vector3, face: ReflectingFace): boolean {
   });
 }
 
-function isPathLegClear(from: Vector3, to: Vector3, boxBounds: AxisAlignedBox[]): boolean {
+function isPathLegClear(from: Vector3, to: Vector3, boxBounds: Float64Array): boolean {
   const distance = distanceBetweenPoints(from, to);
   if (distance <= 2 * PATH_SEGMENT_EPSILON_METERS) return false;
 
@@ -134,7 +134,7 @@ function buildArrivalForPath(
   scene: RoomScene,
   faces: ReflectingFace[],
   images: Vector3[],
-  boxBounds: AxisAlignedBox[],
+  boxBounds: Float64Array,
   speedOfSoundMetersPerSecond: number,
   maximumDistanceMeters: number,
 ): DiscreteArrival | null {
@@ -204,7 +204,7 @@ export function computeImageSourceArrivals(
   if (maximumOrder < 1) return [];
 
   const faces = collectReflectingFaces(scene.boxes);
-  const boxBounds = scene.boxes.map(toAxisAlignedBox);
+  const boxBounds = packBoxBounds(scene.boxes);
   const arrivals: DiscreteArrival[] = [];
 
   const extendPath = (pathFaces: ReflectingFace[], images: Vector3[]): void => {

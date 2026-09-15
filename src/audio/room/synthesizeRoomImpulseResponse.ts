@@ -32,15 +32,16 @@ function latestArrivalTimeSeconds(arrivals: DiscreteArrival[]): number {
  * The reverberation time governs it, with a floor that still guarantees room for the direct sound and the
  * early reflections — an open field has no measurable decay at all, but its ground bounce still has to fit.
  */
-export function chooseImpulseResponseDurationSeconds(histogram: EnergyHistogram, minimumRequiredSeconds: number): number {
+export function chooseImpulseResponseDurationSeconds(
+  histogram: EnergyHistogram,
+  minimumRequiredSeconds: number,
+  maximumSeconds: number = MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS,
+): number {
   const totalEnergyPerBin = histogram.low.map((lowEnergy, binIndex) => lowEnergy + histogram.mid[binIndex] + histogram.high[binIndex]);
   const reverberationTimeSeconds = estimateReverberationTimeSeconds(totalEnergyPerBin, histogram.binDurationSeconds);
   const decaySeconds = reverberationTimeSeconds === null ? 0 : reverberationTimeSeconds * IMPULSE_RESPONSE_DURATION_HEADROOM;
 
-  return Math.min(
-    MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS,
-    Math.max(MINIMUM_IMPULSE_RESPONSE_DURATION_SECONDS, decaySeconds, minimumRequiredSeconds),
-  );
+  return Math.min(maximumSeconds, Math.max(MINIMUM_IMPULSE_RESPONSE_DURATION_SECONDS, decaySeconds, minimumRequiredSeconds));
 }
 
 /**
@@ -82,10 +83,13 @@ export function synthesizeRoomImpulseResponse(
     ),
   ];
 
-  const tracedHistogram = buildEnergyHistogram(arrivals, HISTOGRAM_BIN_DURATION_SECONDS, MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS);
+  // A path longer than the ray budget was never traced, so it caps how much decay this pass can know about —
+  // and with it how much is worth rendering. The live preview lowers that budget deliberately.
+  const tracedDurationSeconds = rayTracingParams.maximumDistanceMeters / rayTracingParams.speedOfSoundMetersPerSecond;
+  const tracedHistogram = buildEnergyHistogram(arrivals, HISTOGRAM_BIN_DURATION_SECONDS, tracedDurationSeconds);
   const histogram = truncateEnergyHistogram(
     tracedHistogram,
-    chooseImpulseResponseDurationSeconds(tracedHistogram, latestArrivalTimeSeconds(coherentArrivals)),
+    chooseImpulseResponseDurationSeconds(tracedHistogram, latestArrivalTimeSeconds(coherentArrivals), tracedDurationSeconds),
   );
 
   const channels = synthesizeImpulseResponseFromHistogram(histogram, sampleRate, scene.listener, rayTracingParams.randomSource);

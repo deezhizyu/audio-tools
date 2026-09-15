@@ -1,7 +1,7 @@
 import { SPEED_OF_SOUND_METERS_PER_SECOND } from './roomAcousticsDefaults';
 import type { FrequencyBandValues, RoomListener } from './roomTypes';
 import { orientationForward } from './sourceDirectivity';
-import { dotVectors, type Vector3 } from './vector3';
+import type { Vector3 } from './vector3';
 
 /** Radius of the head the model is built around — the standard anthropometric value, and the number that
     sets both how far apart the ears are and how strongly the head shadows sound passing it. */
@@ -64,17 +64,29 @@ export interface EarResponse {
   gains: FrequencyBandValues;
 }
 
-/** Re-expresses a world-space direction in the listener's frame. `directionFromListener` points from the
-    listener out toward where the sound is coming from. */
-export function toListenerLocalDirection(directionFromListener: Vector3, listener: RoomListener): ListenerLocalDirection {
+/** The listener's facing and right-hand directions, which only depend on their yaw. Resolved once and reused
+    where the alternative is two trigonometric calls per arrival, of which a simulation has millions. */
+export interface ListenerHorizontalFrame {
+  forwardX: number;
+  forwardZ: number;
+  rightX: number;
+  rightZ: number;
+}
+
+export function listenerHorizontalFrame(listener: RoomListener): ListenerHorizontalFrame {
   const forward = orientationForward(listener.yawDegrees);
   // Completing a right-handed frame with +y up: at yaw 0 the listener faces +x and their right ear points
   // along +z, which is downward in the editor's top view.
-  const right: Vector3 = { x: -forward.z, y: 0, z: forward.x };
+  return { forwardX: forward.x, forwardZ: forward.z, rightX: -forward.z, rightZ: forward.x };
+}
 
+/** Re-expresses a world-space direction in the listener's frame. `directionFromListener` points from the
+    listener out toward where the sound is coming from. */
+export function toListenerLocalDirection(directionFromListener: Vector3, listener: RoomListener): ListenerLocalDirection {
+  const frame = listenerHorizontalFrame(listener);
   return {
-    forward: dotVectors(directionFromListener, forward),
-    right: dotVectors(directionFromListener, right),
+    forward: directionFromListener.x * frame.forwardX + directionFromListener.z * frame.forwardZ,
+    right: directionFromListener.x * frame.rightX + directionFromListener.z * frame.rightZ,
     up: directionFromListener.y,
   };
 }
@@ -148,8 +160,13 @@ export function interauralCoherence(listener: RoomListener): FrequencyBandValues
 /** Where a direction sits on the listener's left/right axis: -1 fully left, +1 fully right, 0 straight ahead
     or straight behind. Replaces the old world-space-x panning, which ignored the listener entirely — so
     turning the listener around changed nothing about what they heard. */
+export function lateralPositionInFrame(frame: ListenerHorizontalFrame, directionX: number, directionZ: number): number {
+  const forward = directionX * frame.forwardX + directionZ * frame.forwardZ;
+  const right = directionX * frame.rightX + directionZ * frame.rightZ;
+  const horizontalLength = Math.hypot(forward, right);
+  return horizontalLength < 1e-12 ? 0 : right / horizontalLength;
+}
+
 export function lateralPositionInListenerFrame(directionFromListener: Vector3, listener: RoomListener): number {
-  const local = toListenerLocalDirection(directionFromListener, listener);
-  const horizontalLength = Math.hypot(local.forward, local.right);
-  return horizontalLength < 1e-12 ? 0 : local.right / horizontalLength;
+  return lateralPositionInFrame(listenerHorizontalFrame(listener), directionFromListener.x, directionFromListener.z);
 }

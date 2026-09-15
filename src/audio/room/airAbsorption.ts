@@ -8,6 +8,12 @@ import type { FrequencyBandValues } from './roomTypes';
     reads as an unnaturally harsh/hissy sheen on any reflection with real path length behind it. */
 export const AIR_ABSORPTION_COEFFICIENTS_PER_METER: FrequencyBandValues = { low: 0.0002, mid: 0.0017, high: 0.0182 };
 
+/** How much of one band's energy survives travelling `distanceMeters` through air. Exposed on its own so the
+    ray tracer's hot path can apply it without building an intermediate three-band object per arrival. */
+export function airAbsorptionGain(coefficientPerMeter: number, distanceMeters: number): number {
+  return Math.exp(-coefficientPerMeter * distanceMeters);
+}
+
 /** Applies distance-based air absorption to an already-computed energy value. Energy (not amplitude) is
     the unit in play throughout this simulator's ray tracer, so the standard `exp(-coefficient * distance)`
     energy-decay form is used directly — no amplitude/sqrt correction is needed here, unlike Steam Audio's
@@ -15,8 +21,8 @@ export const AIR_ABSORPTION_COEFFICIENTS_PER_METER: FrequencyBandValues = { low:
     amplitude-domain samples. */
 export function applyAirAbsorption(energy: FrequencyBandValues, distanceMeters: number): FrequencyBandValues {
   return {
-    low: energy.low * Math.exp(-AIR_ABSORPTION_COEFFICIENTS_PER_METER.low * distanceMeters),
-    mid: energy.mid * Math.exp(-AIR_ABSORPTION_COEFFICIENTS_PER_METER.mid * distanceMeters),
-    high: energy.high * Math.exp(-AIR_ABSORPTION_COEFFICIENTS_PER_METER.high * distanceMeters),
+    low: energy.low * airAbsorptionGain(AIR_ABSORPTION_COEFFICIENTS_PER_METER.low, distanceMeters),
+    mid: energy.mid * airAbsorptionGain(AIR_ABSORPTION_COEFFICIENTS_PER_METER.mid, distanceMeters),
+    high: energy.high * airAbsorptionGain(AIR_ABSORPTION_COEFFICIENTS_PER_METER.high, distanceMeters),
   };
 }

@@ -43,6 +43,13 @@ export const RUSSIAN_ROULETTE_THRESHOLD = 0.1;
 export const INTERACTIVE_NUMBER_OF_RAYS = 256;
 export const INTERACTIVE_MAXIMUM_BOUNCES = 128;
 
+/** How much of a very reverberant room's tail the live preview bothers with. Synthesizing noise costs the
+    same per second of output however few rays produced it, so for a room with a multi-second decay the
+    preview would otherwise spend most of its time rendering tail that nobody dragging a box is listening to.
+    Capping it keeps a drag responsive in exactly the rooms that would otherwise be worst; the full-quality
+    pass that lands a moment later renders the whole decay. */
+export const INTERACTIVE_MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS = 1.5;
+
 export const HISTOGRAM_BIN_DURATION_SECONDS = 0.005;
 
 /** How many reflections deep the deterministic image-source pass goes (see `imageSources.ts`). Two is the
@@ -72,6 +79,7 @@ export const IMPULSE_RESPONSE_DURATION_HEADROOM = 1.2;
     meters, so many bounces fit under any reasonable cap, but a bounce in a large room can cost tens of
     meters, so a flat cap starves large rooms of reflections long before the window it's meant to fill. */
 export const MAXIMUM_RAY_DISTANCE_METERS = MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS * SPEED_OF_SOUND_METERS_PER_SECOND;
+export const INTERACTIVE_MAXIMUM_RAY_DISTANCE_METERS = INTERACTIVE_MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS * SPEED_OF_SOUND_METERS_PER_SECOND;
 
 /** Floor on the hit-point-to-listener distance used when computing a reflection's inverse-square falloff (see
     `traceRays.ts`), so a bounce landing right next to the listener doesn't produce a divide-by-near-zero
