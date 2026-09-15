@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { MAXIMUM_IMAGE_SOURCE_ORDER } from './roomAcousticsDefaults';
 import { traceRays, type RayTracingParams } from './traceRays';
 import type { RoomBox, RoomMaterialId, RoomScene } from './roomTypes';
 
@@ -19,9 +20,8 @@ function buildParams(overrides: Partial<RayTracingParams> = {}): RayTracingParam
   };
 }
 
-/** Uses the `generic-object`/`generic-absorber` materials, whose `scatterAmount` (0.15) matches what used to
-    be the single global `SCATTER_AMOUNT` constant — so with `textureIntensity: 1` (the default), these
-    fixtures reproduce the exact pre-materials physics these tests were originally written against. */
+/** Uses the `generic-object`/`generic-absorber` materials, whose `scatterAmount` is the `SCATTER_AMOUNT`
+    baseline a freshly-drawn box starts on (see `roomMaterials.ts`). */
 function buildObjectBox(overrides: Partial<RoomBox> = {}): RoomBox {
   return {
     id: 'box-1',
@@ -111,13 +111,14 @@ describe('traceRays', () => {
     expect(roughResult[0].energy.low).not.toBeCloseTo(smoothResult[0].energy.low, 6);
   });
 
-  test('a near-specular material aligned with the mirror-reflection direction delivers more energy than a rough one', () => {
+  test('a first bounce contributes only its diffuse lobe — its specular part belongs to the image-source pass', () => {
     // This geometry (source(5,0,0) -> hit(1,0,0) -> listener(8,0,0)) puts the listener exactly along the ray's
-    // mirror-reflection direction, isolating recordReflectionArrival's specular lobe. A near-specular material
-    // (smooth metal) should concentrate its reflected energy into that tight peak and so deliver more of it
-    // here than a rough, diffuse material (grass) spreading the same energy budget over a wide lobe instead —
-    // the opposite of what a diffuse-only NEE contribution (no specular term at all) would produce, where a
-    // near-specular material contributes almost nothing regardless of alignment.
+    // mirror-reflection direction, so a near-specular material would deliver a large specular contribution
+    // here if one were counted. None is: a first bounce off a single surface is an exactly-computable specular
+    // path, and `imageSources.ts` computes it rather than sampling it. What survives here is the diffuse lobe
+    // alone, so the rough material (grass) now out-delivers the near-specular one (smooth metal) — the
+    // opposite ordering to a tracer that counts both, and the check that the two mechanisms aren't both
+    // claiming the same echo.
     const smoothObject = buildObjectBox({ materialId: 'smooth-metal' });
     const roughObject = buildObjectBox({ materialId: 'grass' });
     const buildScene = (box: RoomBox): RoomScene => ({ boxes: [box], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } });
@@ -125,21 +126,35 @@ describe('traceRays', () => {
     const [smoothArrival] = traceRays(buildScene(smoothObject), buildParams());
     const [roughArrival] = traceRays(buildScene(roughObject), buildParams());
 
-    expect(smoothArrival.energy.low).toBeGreaterThan(roughArrival.energy.low);
+    expect(roughArrival.energy.low).toBeGreaterThan(smoothArrival.energy.low);
   });
 
-  test("bounceOrder tags each arrival with how many prior bounces it followed — 0 on the first hit, incrementing after that", () => {
+  test('a bounce past the image-source orders counts its specular lobe again', () => {
+    // Beyond the orders `imageSources.ts` enumerates, specular energy has nowhere else to be accounted for, so
+    // the tracer takes it back. With the fixed random source the ray runs straight down -x, mirroring back and
+    // forth between the enclosing room's inner faces, and the listener sits on that line — so every bounce is
+    // aimed squarely at it and a counted specular lobe is unmistakable against a diffuse-only one.
+    const enclosingRoom = buildObjectBox({ x: -10, y: -10, z: -10, width: 20, height: 20, depth: 20, materialId: 'smooth-metal' });
+    const scene: RoomScene = { boxes: [enclosingRoom], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const arrivals = traceRays(scene, buildParams({ maximumBounces: MAXIMUM_IMAGE_SOURCE_ORDER + 1 }));
+
+    expect(arrivals).toHaveLength(MAXIMUM_IMAGE_SOURCE_ORDER + 1);
+    const lastArrival = arrivals[arrivals.length - 1];
+    for (const earlierArrival of arrivals.slice(0, MAXIMUM_IMAGE_SOURCE_ORDER)) {
+      expect(lastArrival.energy.low).toBeGreaterThan(earlierArrival.energy.low);
+    }
+  });
+
+  test('a ray keeps bouncing and contributing for as many bounces as it is allowed', () => {
     // Same enclosing-room fixture as above, but with room to bounce twice: with the fixed random source the
     // ray travels essentially exactly along -x (see the comment on FIXED_RANDOM_SOURCE), so it hits the inner
     // surface at x=-10 first, reflects to essentially exactly +x, then hits the opposite inner surface at
     // x=10 — two distinct bounces, both with a clear shadow-ray path to the listener at x=8.
     const enclosingRoom = buildObjectBox({ x: -10, y: -10, z: -10, width: 20, height: 20, depth: 20 });
     const scene: RoomScene = { boxes: [enclosingRoom], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
-    const arrivals = traceRays(scene, buildParams({ maximumBounces: 2 }));
 
-    expect(arrivals).toHaveLength(2);
-    expect(arrivals[0].bounceOrder).toBe(0);
-    expect(arrivals[1].bounceOrder).toBe(1);
+    expect(traceRays(scene, buildParams({ maximumBounces: 1 }))).toHaveLength(1);
+    expect(traceRays(scene, buildParams({ maximumBounces: 2 }))).toHaveLength(2);
   });
 
   test('air absorption rolls off high-frequency energy over distance faster than low-frequency energy', () => {

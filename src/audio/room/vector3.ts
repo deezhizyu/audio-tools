@@ -44,9 +44,41 @@ export function randomUnitVector(randomSource: () => number): Vector3 {
   return { x: radiusAtHeight * Math.cos(azimuth), y: radiusAtHeight * Math.sin(azimuth), z };
 }
 
-/** A random unit vector constrained to the hemisphere `normal` points into, for scattering a reflection into a
-    plausible diffuse direction rather than through the surface it just bounced off. */
-export function randomHemisphereVector(normal: Vector3, randomSource: () => number): Vector3 {
-  const candidate = randomUnitVector(randomSource);
-  return dotVectors(candidate, normal) < 0 ? scaleVector(candidate, -1) : candidate;
+/** Two unit vectors perpendicular to `normal` and to each other — a local frame to build directions in.
+    Duff et al.'s branchless construction, which stays numerically stable for a normal pointing in any
+    direction, including straight down the axes where the naive "cross with an arbitrary vector" approach
+    degenerates. */
+export function buildOrthonormalBasis(normal: Vector3): { tangent: Vector3; bitangent: Vector3 } {
+  const sign = normal.z >= 0 ? 1 : -1;
+  const a = -1 / (sign + normal.z);
+  const b = normal.x * normal.y * a;
+  return {
+    tangent: { x: 1 + sign * normal.x * normal.x * a, y: sign * b, z: -sign * normal.x },
+    bitangent: { x: b, y: sign + normal.y * normal.y * a, z: -normal.y },
+  };
+}
+
+/** A random direction in the hemisphere `normal` points into, distributed proportionally to the cosine of
+    the angle from the normal — the distribution a Lambertian (perfectly diffusing) surface actually scatters
+    into, and the one the diffuse lobe in `traceRays.ts` is paired with. Sampling the hemisphere *uniformly*
+    instead, as this used to, sends far too many bounces off at grazing angles: a uniform sample carries the
+    same weight whether it leaves along the normal or skims the surface, where a real diffuse reflector sends
+    almost nothing along the surface. In a room that biases reflected energy toward long, wall-skimming paths
+    and away from the short cross-room ones, which both lengthens and thins the tail.
+
+    Malley's method: a point drawn uniformly on the unit disc, lifted onto the hemisphere above it, is exactly
+    cosine-distributed — no rejection sampling and no trigonometric inversion. */
+export function randomCosineWeightedHemisphereVector(normal: Vector3, randomSource: () => number): Vector3 {
+  const radius = Math.sqrt(randomSource());
+  const azimuth = randomSource() * 2 * Math.PI;
+  const alongTangent = radius * Math.cos(azimuth);
+  const alongBitangent = radius * Math.sin(azimuth);
+  const alongNormal = Math.sqrt(Math.max(0, 1 - radius * radius));
+
+  const { tangent, bitangent } = buildOrthonormalBasis(normal);
+  return {
+    x: tangent.x * alongTangent + bitangent.x * alongBitangent + normal.x * alongNormal,
+    y: tangent.y * alongTangent + bitangent.y * alongBitangent + normal.y * alongNormal,
+    z: tangent.z * alongTangent + bitangent.z * alongBitangent + normal.z * alongNormal,
+  };
 }

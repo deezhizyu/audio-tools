@@ -1,33 +1,30 @@
 import { describe, expect, test } from 'vitest';
-import { buildEnergyHistogram } from './buildEnergyHistogram';
-import { HISTOGRAM_BIN_DURATION_SECONDS, MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS } from './roomAcousticsDefaults';
+import { computeDirectSoundArrival } from './directSound';
+import { computeImageSourceArrivals } from './imageSources';
+import { MAXIMUM_IMAGE_SOURCE_ORDER } from './roomAcousticsDefaults';
 import { synthesizeRoomImpulseResponse } from './synthesizeRoomImpulseResponse';
-import { traceRays, type RayTracingParams } from './traceRays';
+import { DEFAULT_RAY_TRACING_PARAMS, type RayTracingParams } from './traceRays';
 import type { RoomBox, RoomScene } from './roomTypes';
 
-/** Always returns 0.5: every ray direction resolves the same way (see `traceRays.test.ts`), and — just as
-    usefully here — every "random" noise sample resolves to exactly 0 (`0.5 * 2 - 1`), so the noise-based
-    reflection synthesis contributes nothing and can't mask assertions about the direct-sound path. */
-const FIXED_RANDOM_SOURCE = () => 0.5;
 const SAMPLE_RATE = 1000;
 const SPEED_OF_SOUND = 343;
 
+/** Always returns 0.5: every ray direction resolves the same way (see `traceRays.test.ts`), and — just as
+    usefully here — every "random" noise sample resolves to exactly 0 (`0.5 * 2 - 1`), so the noise-based
+    reflection tail contributes nothing and can't mask assertions about the coherent arrivals. */
+const FIXED_RANDOM_SOURCE = () => 0.5;
+
 function buildParams(overrides: Partial<RayTracingParams> = {}): RayTracingParams {
   return {
+    ...DEFAULT_RAY_TRACING_PARAMS,
     numberOfRays: 1,
     maximumBounces: 1,
     speedOfSoundMetersPerSecond: SPEED_OF_SOUND,
-    minimumContributionDistanceMeters: 0.25,
-    minimumEnergyThreshold: 1e-4,
-    maximumDistanceMeters: 200,
     randomSource: FIXED_RANDOM_SOURCE,
     ...overrides,
   };
 }
 
-/** Uses the `generic-object` material, whose `scatterAmount` (0.15) matches what used to be the single global
-    `SCATTER_AMOUNT` constant — so with `textureIntensity: 1` (the default), this fixture reproduces the exact
-    pre-materials physics these tests were originally written against. */
 function buildObjectBox(overrides: Partial<RoomBox> = {}): RoomBox {
   return {
     id: 'box-1',
@@ -45,104 +42,85 @@ function buildObjectBox(overrides: Partial<RoomBox> = {}): RoomBox {
   };
 }
 
+function sumOverWindow(impulseResponse: Float32Array<ArrayBuffer>, startIndex: number, length: number): number {
+  return Array.from(impulseResponse.slice(startIndex, startIndex + length)).reduce((sum, sample) => sum + sample, 0);
+}
+
+function totalEnergy(impulseResponse: Float32Array<ArrayBuffer>): number {
+  return Array.from(impulseResponse).reduce((sum, sample) => sum + sample * sample, 0);
+}
+
 describe('synthesizeRoomImpulseResponse', () => {
-  test('a first-bounce reflection is rendered as a discrete, band-filtered tap at its own arrival time, not folded into the noise histogram', () => {
-    // Same geometry as traceRays.test.ts's basic bounce case: source(5,0,0) -> object hit(1,0,0) -> listener(8,0,0),
-    // an 11m path arriving at ~32ms. With `maximumBounces: 1`, this is necessarily a first ("bounceOrder: 0")
-    // bounce, so `renderDiscreteReflectionTaps.ts` — not the noise histogram — is what puts it in the IR.
+  test('the direct path lands at its own delay, at the amplitude its energy implies', () => {
+    // Source(5,0,0) and listener(8,0,0), 3m apart. Summed over a short window rather than read at one sample:
+    // 3m is 8.75 samples at this rate, so the arrival genuinely falls between two samples and the band-split
+    // kernel spreads it over a few more.
+    const scene: RoomScene = { boxes: [], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, buildParams(), false);
+
+    const directArrival = computeDirectSoundArrival(scene, SPEED_OF_SOUND);
+    const windowStart = Math.floor(directArrival.timeSeconds * SAMPLE_RATE) - 8;
+    for (const impulseResponse of channels) {
+      expect(sumOverWindow(impulseResponse, windowStart, 24)).toBeCloseTo(Math.sqrt(directArrival.energy.low), 3);
+    }
+  });
+
+  test('a specular reflection off a nearby surface is rendered as a coherent tap at its own arrival time', () => {
+    // Source(5,0,0) -> the box's x=1 face -> listener(8,0,0): an 11m path arriving at ~32ms. The image-source
+    // pass finds it exactly; the ray tracer deliberately leaves low-order specular paths alone so the same
+    // echo is never counted twice.
     const scene: RoomScene = { boxes: [buildObjectBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
     const params = buildParams();
 
-    const [reflection] = traceRays(scene, params);
+    const [reflection] = computeImageSourceArrivals(scene, MAXIMUM_IMAGE_SOURCE_ORDER, SPEED_OF_SOUND, params.maximumDistanceMeters);
     expect(reflection).toBeDefined();
-    expect(reflection.bounceOrder).toBe(0);
-    const reflectionSampleIndex = Math.round(reflection.timeSeconds * SAMPLE_RATE);
+    expect(reflection.timeSeconds).toBeCloseTo(11 / SPEED_OF_SOUND, 5);
 
-    // Stereo simulation off here: this test is about tap routing/placement, not panning (this geometry's
-    // source and listener differ only along the left/right axis, so an enabled stereo simulation would pan
-    // both the direct sound and the reflection hard left, deliberately breaking the "identical on every
-    // channel" assertions below) — panning itself is covered in its own test further down.
+    // Stereo simulation off here: this geometry's source and listener differ only along the left/right axis,
+    // so an enabled stereo simulation would pan everything hard left and break the "identical on every
+    // channel" assertion — panning is covered in its own test below.
     const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params, false);
 
-    // FIXED_RANDOM_SOURCE always returns 0.5, which zeroes out both the noise path's white-noise samples
-    // *and* the discrete-tap path's per-tap jitter (see `renderDiscreteReflectionTaps.ts`) — so if the old
-    // noise-only routing were still in effect, this sample would be exactly silent. It isn't: the discrete
-    // tap lands here deterministically regardless of "noise", and (with zero jitter) identically on every
-    // channel.
+    // FIXED_RANDOM_SOURCE zeroes out the noise tail, so anything non-zero here is the coherent tap itself.
+    const windowStart = Math.floor(reflection.timeSeconds * SAMPLE_RATE) - 8;
     const [firstChannel, ...otherChannels] = channels;
-    expect(firstChannel[reflectionSampleIndex]).toBeGreaterThan(0);
+    expect(sumOverWindow(firstChannel, windowStart, 24)).toBeCloseTo(Math.sqrt(reflection.energy.low), 4);
     for (const impulseResponse of otherChannels) {
-      expect(impulseResponse[reflectionSampleIndex]).toBeCloseTo(firstChannel[reflectionSampleIndex]);
-    }
-
-    // The direct, unreflected path (3m, unoccluded) is still a true single impulse, unaffected by any of
-    // this, and still shows up exactly, identically on every channel.
-    const directSampleIndex = Math.round((3 / SPEED_OF_SOUND) * SAMPLE_RATE);
-    for (const impulseResponse of channels) {
-      expect(impulseResponse[directSampleIndex]).toBeCloseTo(1 / 3);
+      expect(sumOverWindow(impulseResponse, windowStart, 24)).toBeCloseTo(sumOverWindow(firstChannel, windowStart, 24), 6);
     }
   });
 
-  test('a high-scatter material (grass)\'s first bounce is also rendered as a discrete tap — bounce order decides the path, not roughness', () => {
-    const roughObject = buildObjectBox({ materialId: 'grass' });
-    const scene: RoomScene = { boxes: [roughObject], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
-    const params = buildParams();
+  test('the impulse response is only as long as the room needs, not a fixed length', () => {
+    // An open scene has nothing to decay, so rendering seconds of silence for it is wasted work; a live room
+    // needs every bit of its tail or it ends on an abrupt edge. One fixed length cannot serve both.
+    const openScene: RoomScene = { boxes: [], source: { x: 0, y: 1.5, z: 0 }, listener: { x: 2, y: 1.5, z: 0 } };
+    const liveRoom: RoomScene = {
+      boxes: [buildObjectBox({ x: -6, y: 0, z: -5, width: 12, height: 4, depth: 10, absorption: { low: 0.04, mid: 0.04, high: 0.05 } })],
+      source: { x: -2, y: 1.5, z: 0 },
+      listener: { x: 2, y: 1.5, z: 0 },
+    };
 
-    const [reflection] = traceRays(scene, params);
-    expect(reflection).toBeDefined();
-    expect(reflection.bounceOrder).toBe(0);
-    const reflectionSampleIndex = Math.round(reflection.timeSeconds * SAMPLE_RATE);
+    const params = buildParams({ numberOfRays: 512, maximumBounces: 200, randomSource: Math.random });
+    const [openChannel] = synthesizeRoomImpulseResponse(openScene, SAMPLE_RATE, params, false);
+    const [liveChannel] = synthesizeRoomImpulseResponse(liveRoom, SAMPLE_RATE, params, false);
 
-    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params, false); // see comment on the test above
-    for (const impulseResponse of channels) {
-      expect(impulseResponse[reflectionSampleIndex]).toBeGreaterThan(0);
-    }
+    expect(liveChannel.length).toBeGreaterThan(openChannel.length * 2);
   });
 
-  test('an early and a late reflection both land in the same time-binned histogram, at their own true arrival time', () => {
-    // Near reflection (~32ms, same geometry as above) and a far one (source -> hit ~53m, hit -> listener ~56m,
-    // ~318ms) — previously routed through two different representations (a literal early delta vs. a late
-    // noise bin); now both are simply energy in the histogram bin matching their own arrival time.
-    const params = buildParams();
-    const nearScene: RoomScene = { boxes: [buildObjectBox()], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
-    const farScene: RoomScene = { boxes: [buildObjectBox({ x: -50, width: 2 })], source: { x: 5, y: 0, z: 0 }, listener: { x: 8, y: 0, z: 0 } };
-
-    const [nearArrival] = traceRays(nearScene, params);
-    const [farArrival] = traceRays(farScene, params);
-    expect(nearArrival.timeSeconds).toBeLessThan(0.08);
-    expect(farArrival.timeSeconds).toBeGreaterThan(0.08);
-
-    const histogram = buildEnergyHistogram(
-      [nearArrival, farArrival],
-      params.numberOfRays,
-      HISTOGRAM_BIN_DURATION_SECONDS,
-      MAXIMUM_IMPULSE_RESPONSE_DURATION_SECONDS,
-    );
-
-    expect(histogram.low[Math.floor(nearArrival.timeSeconds / HISTOGRAM_BIN_DURATION_SECONDS)]).toBeGreaterThan(0);
-    expect(histogram.low[Math.floor(farArrival.timeSeconds / HISTOGRAM_BIN_DURATION_SECONDS)]).toBeGreaterThan(0);
-  });
-
-  test('with stereo simulation enabled, a source placed hard left of the listener is heard louder on the left channel than the right', () => {
+  test('with stereo simulation enabled, a source placed hard left of the listener is heard louder on the left channel', () => {
     // Source and listener differ only in x (the left/right axis — see TOP_VIEW_AXES in RoomEditor.tsx), with
     // the source on the negative side, so both the direct path and the object's reflection arrive from the
     // listener's left.
     const scene: RoomScene = { boxes: [buildObjectBox({ x: 2 })], source: { x: -5, y: 0, z: 0 }, listener: { x: 0, y: 0, z: 0 } };
-    const params = buildParams();
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, buildParams(), true);
 
-    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params, true);
-
-    const totalEnergy = (impulseResponse: Float32Array<ArrayBuffer>) => Array.from(impulseResponse).reduce((sum, sample) => sum + sample * sample, 0);
     expect(totalEnergy(channels[0])).toBeGreaterThan(totalEnergy(channels[1]));
   });
 
-  test('with stereo simulation disabled, a source placed hard left of the listener is still heard identically on every channel', () => {
+  test('with stereo simulation disabled, a source placed hard left of the listener is heard identically on every channel', () => {
     const scene: RoomScene = { boxes: [buildObjectBox({ x: 2 })], source: { x: -5, y: 0, z: 0 }, listener: { x: 0, y: 0, z: 0 } };
-    const params = buildParams();
+    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, buildParams(), false);
 
-    const channels = synthesizeRoomImpulseResponse(scene, SAMPLE_RATE, params, false);
-
-    const totalEnergy = (impulseResponse: Float32Array<ArrayBuffer>) => Array.from(impulseResponse).reduce((sum, sample) => sum + sample * sample, 0);
     expect(totalEnergy(channels[0])).toBeCloseTo(totalEnergy(channels[1]));
   });
 });
