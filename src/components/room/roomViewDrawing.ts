@@ -22,12 +22,14 @@ const MARKER_RADIUS_PIXELS = 6;
 /** Marker decoration is sized in pixels rather than meters, so a facing arrow stays grabbable and a pair of
     ears stays legible at any zoom level — these are interface elements pointing at a position, not objects
     occupying space in the room. */
-export const FACING_ARROW_LENGTH_PIXELS = 26;
+export const FACING_ARROW_LENGTH_PIXELS = 34;
 const FACING_ARROW_HEAD_PIXELS = 6;
 export const ROTATION_HANDLE_RADIUS_PIXELS = 5;
 const EAR_OFFSET_PIXELS = 11;
 const EAR_RADIUS_PIXELS = 3;
 const MONO_RING_RADIUS_PIXELS = 10;
+/** Kept comfortably shorter than the facing arrow, so the arrowhead a user grabs to rotate the source
+    always stands clear of the lobe drawn around it rather than being buried in it. */
 const DIRECTIVITY_LOBE_RADIUS_PIXELS = 22;
 const DIRECTIVITY_LOBE_SEGMENTS = 64;
 

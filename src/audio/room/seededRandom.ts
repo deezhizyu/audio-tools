@@ -4,7 +4,7 @@
  * Determinism is the point, not speed. Ray tracing and noise synthesis both draw millions of numbers, and
  * with `Math.random` the same room simulated twice produces two different impulse responses — the paths and
  * the noise texture differ even though nothing about the room changed. Live editing runs a simulation on
- * every edit and crossfades between consecutive results (`blendImpulseResponses.ts`), so that变 variation is
+ * every edit and crossfades between consecutive results (`blendImpulseResponses.ts`), so that variation is
  * audible as the reverb's character shifting continuously under a drag, with nothing to settle onto. Seeding
  * from a fixed value instead means an unchanged room re-simulates to exactly the same answer, and only a real
  * change to the room changes what is heard.
