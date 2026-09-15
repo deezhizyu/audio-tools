@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { ROOM_MATERIALS } from '../../audio/room/roomMaterials';
+import { getRoomMaterialsInGroup, type RoomMaterialGroup } from '../../audio/room/roomMaterials';
 import type { RoomBox, RoomMaterialId } from '../../audio/room/roomTypes';
 import {
   activeRoomEditorTool,
@@ -60,25 +60,14 @@ const ABSORPTION_BANDS: { band: 'low' | 'mid' | 'high'; label: string }[] = [
   { band: 'high', label: 'High' },
 ];
 
-/** Purely a picker-grouping split (optgroups), not a hard restriction — any material can still be applied to
-    either an object or an absorber box. */
-const HARD_SURFACE_MATERIAL_IDS = new Set<RoomMaterialId>([
-  'generic-object',
-  'concrete',
-  'painted-brick',
-  'bare-brick',
-  'linoleum',
-  'parquet',
-  'wood',
-  'plastic',
-  'smooth-metal',
-  'uneven-metal',
-  'glass',
-  'gypsum-board',
-  'grass',
-]);
-const HARD_SURFACE_MATERIALS = ROOM_MATERIALS.filter(material => HARD_SURFACE_MATERIAL_IDS.has(material.id));
-const SOFT_SURFACE_MATERIALS = ROOM_MATERIALS.filter(material => !HARD_SURFACE_MATERIAL_IDS.has(material.id));
+/** Mirrors the catalog's own grouping (see `RoomMaterialGroup`), so adding a material is a change in one
+    file rather than two. Purely a picker split — any material can still be applied to either an object or an
+    absorber box. */
+const MATERIAL_GROUPS: { group: RoomMaterialGroup; label: string }[] = [
+  { group: 'hard', label: 'Hard surfaces' },
+  { group: 'soft', label: 'Soft surfaces & furnishings' },
+  { group: 'ground', label: 'Ground & outdoors' },
+];
 
 function NumberField({
   label,
@@ -163,20 +152,15 @@ function MaterialSelect({ value, onChange }: { value: RoomMaterialId | null; onC
             Change material…
           </option>
         )}
-        <optgroup label="Hard surfaces">
-          {HARD_SURFACE_MATERIALS.map(material => (
-            <option key={material.id} value={material.id}>
-              {material.label}
-            </option>
-          ))}
-        </optgroup>
-        <optgroup label="Soft surfaces">
-          {SOFT_SURFACE_MATERIALS.map(material => (
-            <option key={material.id} value={material.id}>
-              {material.label}
-            </option>
-          ))}
-        </optgroup>
+        {MATERIAL_GROUPS.map(({ group, label }) => (
+          <optgroup key={group} label={label}>
+            {getRoomMaterialsInGroup(group).map(material => (
+              <option key={material.id} value={material.id}>
+                {material.label}
+              </option>
+            ))}
+          </optgroup>
+        ))}
       </select>
     </label>
   );

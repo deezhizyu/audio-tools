@@ -10,25 +10,45 @@ export interface FrequencyBandValues {
 export type RoomBoxKind = 'object' | 'absorber';
 
 /** One entry per `RoomMaterial` in `roomMaterials.ts`. Declared here (rather than in `roomMaterials.ts`) so
-    that module can depend on this one without a cycle. */
+    that module can depend on this one without a cycle; that module's catalog is keyed by this union, so a
+    name added here without a matching entry there is a compile error. */
 export type RoomMaterialId =
+  // Hard surfaces
   | 'generic-object'
-  | 'generic-absorber'
   | 'concrete'
+  | 'concrete-block'
   | 'painted-brick'
   | 'bare-brick'
   | 'linoleum'
   | 'parquet'
   | 'wood'
-  | 'wool'
+  | 'wood-paneling'
   | 'plastic'
   | 'smooth-metal'
   | 'uneven-metal'
   | 'glass'
-  | 'carpet'
+  | 'plate-glass'
   | 'gypsum-board'
+  // Soft, absorptive surfaces and furnishings
+  | 'generic-absorber'
+  | 'wool'
+  | 'carpet'
+  | 'carpet-on-concrete'
   | 'acoustic-foam'
-  | 'grass';
+  | 'ceiling-tile'
+  | 'curtain'
+  | 'upholstered-seat'
+  | 'occupied-seating'
+  | 'mattress'
+  | 'bookshelf'
+  // Ground and outdoor surfaces
+  | 'grass'
+  | 'soil'
+  | 'gravel'
+  | 'asphalt'
+  | 'water'
+  | 'snow'
+  | 'foliage';
 
 export interface RoomBox {
   id: string;

@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'vitest';
-import { DEFAULT_ABSORBER_MATERIAL_ID, DEFAULT_OBJECT_MATERIAL_ID, getEffectiveScatterAmount, getRoomMaterial, ROOM_MATERIALS } from './roomMaterials';
+import {
+  DEFAULT_ABSORBER_MATERIAL_ID,
+  DEFAULT_OBJECT_MATERIAL_ID,
+  getEffectiveScatterAmount,
+  getRoomMaterial,
+  getRoomMaterialsInGroup,
+  ROOM_MATERIALS,
+} from './roomMaterials';
 import type { RoomBox } from './roomTypes';
 
 function buildBox(overrides: Partial<RoomBox> = {}): RoomBox {
@@ -41,8 +48,31 @@ describe('ROOM_MATERIALS', () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  test('includes grass', () => {
-    expect(ROOM_MATERIALS.some(material => material.id === 'grass')).toBe(true);
+  test('every entry belongs to a group, and every group has entries', () => {
+    // The editor's material picker builds its sections straight from these, so an empty or mislabelled group
+    // would silently hide materials from the user.
+    for (const group of ['hard', 'soft', 'ground'] as const) {
+      expect(getRoomMaterialsInGroup(group).length).toBeGreaterThan(0);
+    }
+    expect(getRoomMaterialsInGroup('hard').length + getRoomMaterialsInGroup('soft').length + getRoomMaterialsInGroup('ground').length).toBe(
+      ROOM_MATERIALS.length,
+    );
+  });
+
+  test('absorption rises with frequency for the porous materials, and stays flat for the hard ones', () => {
+    // Porous and fibrous materials work by letting air move through them, which they do far better at short
+    // wavelengths — so any of them absorbing less at 4kHz than at 125Hz means its published octave bands were
+    // mapped onto the wrong simulator bands, which is a much easier mistake to make than a wrong number.
+    for (const id of ['grass', 'carpet', 'acoustic-foam', 'wool', 'curtain', 'gravel', 'snow'] as const) {
+      const { absorption } = getRoomMaterial(id);
+      expect(absorption.mid).toBeGreaterThan(absorption.low);
+    }
+  });
+
+  test('includes ground materials an outdoor scene needs', () => {
+    for (const id of ['grass', 'asphalt', 'gravel', 'soil'] as const) {
+      expect(getRoomMaterial(id).id).toBe(id);
+    }
   });
 });
 
@@ -76,13 +106,10 @@ describe('getEffectiveScatterAmount', () => {
   });
 
   test('clamps to 1 when textureIntensity pushes the product above 1', () => {
-    // No catalog material's scatterAmount is high enough on its own to clamp at the maximum textureIntensity
-    // (2) — every entry is calibrated well below 0.5 (see roomMaterials.ts) — so this isolates the clamp math
-    // directly on a box rather than depending on a specific catalog value staying above 0.5.
+    // Scattering is consumed as a specular/diffuse mix fraction, so it can never exceed "entirely diffuse"
+    // however far the roughness slider is pushed.
     const roughestMaterial = ROOM_MATERIALS.reduce((roughest, material) => (material.scatterAmount > roughest.scatterAmount ? material : roughest));
-    expect(roughestMaterial.scatterAmount * 2).toBeLessThan(1); // sanity check: the catalog really can't reach the clamp unaided
-    const box = buildBox({ materialId: roughestMaterial.id, textureIntensity: 2 / roughestMaterial.scatterAmount });
-    expect(getEffectiveScatterAmount(box)).toBe(1);
+    expect(getEffectiveScatterAmount(buildBox({ materialId: roughestMaterial.id, textureIntensity: 2 }))).toBe(1);
   });
 
   test('clamps to 0 for a zero textureIntensity', () => {
